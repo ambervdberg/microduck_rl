@@ -18,6 +18,9 @@ import mujoco
 import mujoco.viewer
 import onnxruntime as ort
 
+# scripts/ is sys.path[0] when this file is run as a script.
+from gestures import GesturePlayer, default_gestures
+
 MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_ramps.xml"
 # MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene_floor_objects.xml"
@@ -360,6 +363,12 @@ class PolicyInference:
         else:
             self.head_max = 2.5
             self.head_step = 0.83
+
+        # Scripted head gestures (nod / shake). They sit ON TOP of the manual
+        # head offset: `_gesture_base` remembers where the head was when the gesture started, 
+        # so nodding while looking left keeps looking left.
+        self.gesture_player = GesturePlayer(default_gestures())
+        self._gesture_base = np.zeros(4, dtype=np.float32)
 
         # Action delay buffer
         self.use_delay = self.delay_max_lag > 0
@@ -764,6 +773,28 @@ class PolicyInference:
             print(f"Sit: OFF → back to {self.current_policy}")
         self._update_command()
 
+    def start_gesture(self, key):
+        """Start the gesture bound to `key`. Returns None if `key` is unbound."""
+        cfg = self.gesture_player.trigger(key)
+        if cfg is None:
+            return None
+        self._gesture_base[:] = self.head_offset
+        print(f"Gesture: {cfg.name} ({cfg.duration_s:.1f}s)")
+        return cfg
+
+    def update_gestures(self, dt):
+        """Advance the active gesture and write its head pose into the command."""
+        offset = self.gesture_player.advance(dt)
+        if offset is None:
+            return
+        np.clip(
+            self._gesture_base + offset,
+            -self.head_max,
+            self.head_max,
+            out=self.head_offset,
+        )
+        self._update_command()
+
     def toggle_head_mode(self):
         """Toggle head control mode on/off."""
         self.head_mode = not self.head_mode
@@ -1144,6 +1175,8 @@ def main():
                     policy.toggle_sit()
                 else:
                     policy.toggle_slope_mode()
+            elif key in policy.gesture_player.keys():
+                policy.start_gesture(key)
             elif key == "h":
                 policy.toggle_head_mode()
             elif key == "b":
@@ -1203,6 +1236,8 @@ def main():
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
+    print("  N:                nod yes   (scripted head gesture, no extra policy)")
+    print("  M:                shake no  (scripted head gesture, no extra policy)")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")
     print(f"  UP/DOWN arrow:    Δz ±10mm  (max ±{BODY_CMD_MAX_Z*1000:.0f}mm)")
@@ -1256,6 +1291,7 @@ def main():
 
                 policy.update_ground_pick_phase(actual_dt)
                 policy.update_behavior(actual_dt)
+                policy.update_gestures(actual_dt)
 
                 if policy_enabled:
                     action = policy.infer()
