@@ -41,6 +41,9 @@ def start_bridge(state: BridgeState, port: int) -> ThreadingHTTPServer:
             except json.JSONDecodeError:
                 self._reply(400, {"error": "body is not valid JSON"})
                 return
+            if not isinstance(body, dict):
+                self._reply(400, {"error": "body must be a JSON object"})
+                return
             try:
                 if self.path == "/walk":
                     self._reply(200, state.submit_walk(

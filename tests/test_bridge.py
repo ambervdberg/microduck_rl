@@ -239,3 +239,15 @@ class TestBridgeServer:
         with pytest.raises(urllib.error.HTTPError) as excinfo:
             _post(f"{url}/dance", {})
         assert excinfo.value.code == 404
+
+    def test_non_object_json_body_returns_400(self, served_state):
+        state, url = served_state
+        req = urllib.request.Request(
+            f"{url}/walk", data=b"5", method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(req, timeout=5)
+        assert excinfo.value.code == 400
+        assert "error" in json.loads(excinfo.value.read())
+        assert state.drain() == []
