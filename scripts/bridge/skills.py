@@ -1,4 +1,4 @@
-"""Applies queued bridge commands to a PolicyInference on the sim thread.
+"""Applies queued bridge commands to one PolicyInference on the sim thread.
 
 Every walk has a deadline; expiry returns to the zero command, which is
 the trained stand-still state. Head pose indices: head_offset[1] is
@@ -11,46 +11,55 @@ GESTURE_KEYS = {"nod": "n", "shake": "m"}
 
 FALLEN_GRAVITY_Z = -0.5  # projected gravity z is near -1 upright, near 0 on the ground
 
-_walk_deadline: float | None = None
 
+class SkillRunner:
+    """Applies queued bridge commands to one PolicyInference on the sim thread."""
 
-def tick(policy, state: BridgeState, now: float) -> None:
-    """Drain pending commands, apply them, expire walks, refresh status."""
-    global _walk_deadline
+    def __init__(self, policy, state: BridgeState):
+        self._policy = policy
+        self._state = state
+        self._walk_deadline: float | None = None
 
-    for cmd in state.drain():
+    def tick(self, now: float) -> None:
+        """Drain pending commands, apply them, expire walks, refresh status."""
+        for cmd in self._state.drain():
+            self._apply(cmd, now)
+
+        self._expire_walk(now)
+        self._publish_status(now)
+
+    def _apply(self, cmd, now: float) -> None:
+        """Apply a single command from the queue."""
         if isinstance(cmd, WalkCmd):
-            policy.set_vel_cmd(cmd.vx, cmd.vy, cmd.wz)
-            _walk_deadline = now + cmd.seconds
+            self._policy.set_vel_cmd(cmd.vx, cmd.vy, cmd.wz)
+            self._walk_deadline = now + cmd.seconds
         elif isinstance(cmd, StopCmd):
-            _walk_deadline = None
-            policy.gesture_player.cancel()
-            policy.head_offset[:] = 0.0
-            policy.set_vel_cmd(0.0, 0.0, 0.0)
+            self._walk_deadline = None
+            self._policy.gesture_player.cancel()
+            self._policy.head_offset[:] = 0.0
+            self._policy.set_vel_cmd(0.0, 0.0, 0.0)
         elif isinstance(cmd, LookCmd):
-            policy.gesture_player.cancel()
-            policy.head_offset[1] = cmd.pitch
-            policy.head_offset[2] = cmd.yaw
-            policy._update_command()
+            self._policy.gesture_player.cancel()
+            self._policy.head_offset[1] = cmd.pitch
+            self._policy.head_offset[2] = cmd.yaw
+            self._policy._update_command()
         elif isinstance(cmd, GestureCmd):
-            policy.start_gesture(GESTURE_KEYS[cmd.name])
+            self._policy.start_gesture(GESTURE_KEYS[cmd.name])
 
-    if _walk_deadline is not None and now >= _walk_deadline:
-        _walk_deadline = None
-        policy.set_vel_cmd(0.0, 0.0, 0.0)
+    def _expire_walk(self, now: float) -> None:
+        """Zero velocity if walk deadline has passed."""
+        if self._walk_deadline is not None and now >= self._walk_deadline:
+            self._walk_deadline = None
+            self._policy.set_vel_cmd(0.0, 0.0, 0.0)
 
-    gravity_z = float(policy.get_projected_gravity()[2])
-    state.set_status({
-        "policy": policy.current_policy,
-        "twist": [float(v) for v in policy.vel_cmd],
-        "head": [float(v) for v in policy.head_offset],
-        "walk_seconds_left": max(0.0, _walk_deadline - now) if _walk_deadline else 0.0,
-        "gesture": policy.gesture_player.active_name,
-        "fallen": gravity_z > FALLEN_GRAVITY_Z,
-    })
-
-
-def reset() -> None:
-    """Clear module state (tests only)."""
-    global _walk_deadline
-    _walk_deadline = None
+    def _publish_status(self, now: float) -> None:
+        """Update state with current policy snapshot."""
+        gravity_z = float(self._policy.get_projected_gravity()[2])
+        self._state.set_status({
+            "policy": self._policy.current_policy,
+            "twist": [float(v) for v in self._policy.vel_cmd],
+            "head": [float(v) for v in self._policy.head_offset],
+            "walk_seconds_left": max(0.0, self._walk_deadline - now) if self._walk_deadline else 0.0,
+            "gesture": self._policy.gesture_player.active_name,
+            "fallen": gravity_z > FALLEN_GRAVITY_Z,
+        })

@@ -115,63 +115,63 @@ class FakePolicy:
 
 
 class TestSkillsTick:
-    @pytest.fixture(autouse=True)
-    def _fresh_skills(self):
-        skills.reset()
-        yield
-        skills.reset()
-
     def test_walk_applies_and_expires_to_zero(self):
         state, policy = BridgeState(), FakePolicy()
+        runner = skills.SkillRunner(policy, state)
         state.submit_walk(0.2, 0.0, 0.3, 2.0)
-        skills.tick(policy, state, now=100.0)
+        runner.tick(now=100.0)
         assert policy.vel_cmd.tolist() == pytest.approx([0.2, 0.0, 0.3])
 
-        skills.tick(policy, state, now=101.9)  # still walking
+        runner.tick(now=101.9)  # still walking
         assert policy.vel_cmd[0] == pytest.approx(0.2)
 
-        skills.tick(policy, state, now=102.1)  # deadline passed
+        runner.tick(now=102.1)  # deadline passed
         assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
 
     def test_new_walk_extends_deadline(self):
         state, policy = BridgeState(), FakePolicy()
+        runner = skills.SkillRunner(policy, state)
         state.submit_walk(0.2, 0.0, 0.0, 2.0)
-        skills.tick(policy, state, now=100.0)
+        runner.tick(now=100.0)
         state.submit_walk(0.1, 0.0, 0.0, 5.0)
-        skills.tick(policy, state, now=101.0)
-        skills.tick(policy, state, now=103.0)  # old deadline passed, new one not
+        runner.tick(now=101.0)
+        runner.tick(now=103.0)  # old deadline passed, new one not
         assert policy.vel_cmd[0] == pytest.approx(0.1)
 
     def test_stop_zeroes_twist_head_and_gesture(self):
         state, policy = BridgeState(), FakePolicy()
+        runner = skills.SkillRunner(policy, state)
         state.submit_walk(0.2, 0.1, 0.0, 5.0)
         state.submit_look(0.3, -0.2)
         state.submit_gesture("nod")
-        skills.tick(policy, state, now=100.0)
+        runner.tick(now=100.0)
         state.submit_stop()
-        skills.tick(policy, state, now=100.1)
+        runner.tick(now=100.1)
         assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
         assert policy.head_offset.tolist() == [0.0, 0.0, 0.0, 0.0]
         assert policy.gesture_player.active_name is None
 
     def test_look_writes_head_pitch_and_yaw(self):
         state, policy = BridgeState(), FakePolicy()
+        runner = skills.SkillRunner(policy, state)
         state.submit_look(0.3, -0.4)
-        skills.tick(policy, state, now=100.0)
+        runner.tick(now=100.0)
         assert policy.head_offset.tolist() == pytest.approx([0.0, 0.3, -0.4, 0.0])
         assert policy.command_updates > 0
 
     def test_gesture_maps_names_to_keys(self):
         state, policy = BridgeState(), FakePolicy()
+        runner = skills.SkillRunner(policy, state)
         state.submit_gesture("nod")
         state.submit_gesture("shake")
-        skills.tick(policy, state, now=100.0)
+        runner.tick(now=100.0)
         assert policy.started_gestures == ["n", "m"]
 
     def test_status_snapshot_content(self):
         state, policy = BridgeState(), FakePolicy()
+        runner = skills.SkillRunner(policy, state)
         state.submit_walk(0.2, 0.0, 0.0, 2.0)
-        skills.tick(policy, state, now=100.0)
+        runner.tick(now=100.0)
         status = state.get_status()
         assert status["policy"] == "walking"
         assert status["twist"] == pytest.approx([0.2, 0.0, 0.0])
