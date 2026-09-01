@@ -25,7 +25,7 @@ NUM_STEPS_PER_ENV = 24
 TURN_IN_PLACE_FRACTION = 0.15
 
 # Symmetry
-ENABLE_SYMMETRY = False
+ENABLE_SYMMETRY = True
 
 # Domain randomization toggles
 ENABLE_COM_RANDOMIZATION = True
@@ -339,8 +339,11 @@ def make_microduck_velocity_env_cfg(
     cfg.rewards["angular_momentum"].weight = -0.02
 
     # Velocity tracking rewards
+    # linear std tightened sqrt(0.1) -> sqrt(0.04): at std^2=0.1 a 0.07 m/s
+    # shortfall still paid 95% of the term, so undershooting the command was
+    # nearly free and the measured policy walked ~25% slow at every speed.
     cfg.rewards["track_linear_velocity"].weight = 2.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.1)
+    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.04)
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
