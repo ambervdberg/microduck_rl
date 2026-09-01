@@ -4,6 +4,7 @@ The HTTP thread submits commands; the sim thread drains and applies them.
 Caps match the trained command ranges in microduck_velocity_env_cfg.py.
 """
 
+import math
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -45,14 +46,17 @@ class StopCmd:
 
 
 def _clamp(value: float, limit: float) -> float:
-    return max(-limit, min(limit, float(value)))
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("value must be a finite number")
+    return max(-limit, min(limit, value))
 
 
 class BridgeState:
     def __init__(self):
         self._lock = threading.Lock()
         self._pending: deque = deque()
-        self._status: dict = {}
+        self._status: dict = {"ready": False}
 
     def submit_walk(self, vx, vy, wz, seconds) -> dict:
         cvx, cvy, cwz = _clamp(vx, VX_MAX), _clamp(vy, VY_MAX), _clamp(wz, WZ_MAX)

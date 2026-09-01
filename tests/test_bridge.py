@@ -62,6 +62,12 @@ class TestBridgeState:
         assert echo["yaw"] == pytest.approx(HEAD_YAW_MAX)
         assert state.drain() == [LookCmd(0.0, HEAD_YAW_MAX)]
 
+    def test_walk_with_nan_speed_raises_and_queues_nothing(self):
+        state = BridgeState()
+        with pytest.raises(ValueError):
+            state.submit_walk(float("nan"), 0.0, 0.0, 1.0)
+        assert state.drain() == []
+
     def test_unknown_gesture_is_rejected_and_not_queued(self):
         state = BridgeState()
         with pytest.raises(ValueError):
@@ -101,13 +107,14 @@ class FakeGesturePlayer:
 class FakePolicy:
     """Mimics the PolicyInference surface the bridge touches."""
 
-    def __init__(self):
+    def __init__(self, gravity_z: float = -1.0):
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.head_offset = np.zeros(4, dtype=np.float32)
         self.current_policy = "standing"
         self.gesture_player = FakeGesturePlayer()
         self.started_gestures = []
         self.command_updates = 0
+        self.gravity_z = gravity_z
 
     def set_vel_cmd(self, vx, vy, wz):
         self.vel_cmd = np.array([vx, vy, wz], dtype=np.float32)
@@ -122,7 +129,7 @@ class FakePolicy:
         return object()
 
     def get_projected_gravity(self):
-        return np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        return np.array([0.0, 0.0, self.gravity_z], dtype=np.float32)
 
 
 class TestSkillsTick:
@@ -184,11 +191,25 @@ class TestSkillsTick:
         state.submit_walk(0.2, 0.0, 0.0, 2.0)
         runner.tick(now=100.0)
         status = state.get_status()
+        assert status["ready"] is True
         assert status["policy"] == "walking"
         assert status["twist"] == pytest.approx([0.2, 0.0, 0.0])
         assert status["walk_seconds_left"] == pytest.approx(2.0)
         assert status["gesture"] is None
         assert status["fallen"] is False
+
+    @pytest.mark.parametrize("gravity_z", [0.0, 0.9])
+    def test_fallen_is_true_near_or_past_upright(self, gravity_z):
+        state, policy = BridgeState(), FakePolicy(gravity_z=gravity_z)
+        runner = skills.SkillRunner(policy, state)
+        runner.tick(now=100.0)
+        assert state.get_status()["fallen"] is True
+
+    def test_fallen_is_false_when_upright(self):
+        state, policy = BridgeState(), FakePolicy(gravity_z=-1.0)
+        runner = skills.SkillRunner(policy, state)
+        runner.tick(now=100.0)
+        assert state.get_status()["fallen"] is False
 
 
 def _post(url, body):
@@ -215,6 +236,20 @@ class TestBridgeServer:
         assert status == 200
         assert body["vx"] == pytest.approx(0.2)
         assert state.drain() == [WalkCmd(0.2, 0.0, 0.0, 2.0)]
+
+    def test_stop_roundtrip(self, served_state):
+        state, url = served_state
+        status, body = _post(f"{url}/stop", {})
+        assert status == 200
+        assert body == {"stopped": True}
+        assert state.drain() == [StopCmd()]
+
+    def test_look_roundtrip(self, served_state):
+        state, url = served_state
+        status, body = _post(f"{url}/look", {"pitch": 0.3, "yaw": -0.2})
+        assert status == 200
+        assert body == {"pitch": pytest.approx(0.3), "yaw": pytest.approx(-0.2), "clamped": False}
+        assert state.drain() == [LookCmd(0.3, -0.2)]
 
     def test_status_roundtrip(self, served_state):
         state, url = served_state

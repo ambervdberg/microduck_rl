@@ -13,7 +13,7 @@ FALLEN_GRAVITY_Z = -0.5  # projected gravity z is near -1 upright, near 0 on the
 
 
 class SkillRunner:
-    """Applies queued bridge commands to one PolicyInference on the sim thread."""
+    """Runs one tick: drain the queue, apply commands, publish status."""
 
     def __init__(self, policy, state: BridgeState):
         self._policy = policy
@@ -38,6 +38,7 @@ class SkillRunner:
             self._policy.gesture_player.cancel()
             self._policy.head_offset[:] = 0.0
             self._policy.set_vel_cmd(0.0, 0.0, 0.0)
+            self._policy._update_command()
         elif isinstance(cmd, LookCmd):
             self._policy.gesture_player.cancel()
             self._policy.head_offset[1] = cmd.pitch
@@ -55,11 +56,14 @@ class SkillRunner:
     def _publish_status(self, now: float) -> None:
         """Update state with current policy snapshot."""
         gravity_z = float(self._policy.get_projected_gravity()[2])
+        # not (<=) reads NaN as fallen, unlike a direct > comparison.
+        fallen = not (gravity_z <= FALLEN_GRAVITY_Z)
         self._state.set_status({
+            "ready": True,
             "policy": self._policy.current_policy,
             "twist": [float(v) for v in self._policy.vel_cmd],
             "head": [float(v) for v in self._policy.head_offset],
             "walk_seconds_left": max(0.0, self._walk_deadline - now) if self._walk_deadline else 0.0,
             "gesture": self._policy.gesture_player.active_name,
-            "fallen": gravity_z > FALLEN_GRAVITY_Z,
+            "fallen": fallen,
         })
