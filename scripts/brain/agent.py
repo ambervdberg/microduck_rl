@@ -2,10 +2,12 @@
 
 Needs AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT.
 Start the sim first: uv run scripts/infer_policy.py --walking <onnx> --new-cmd-obs --bridge 8630
+Run: UV_PROJECT_ENVIRONMENT=~/.venvs/microduck_brain uv run --project scripts/brain python scripts/brain/agent.py
 """
 
 import os
 import sys
+from urllib.parse import urlsplit
 
 from langchain.agents import create_agent
 from langchain_openai import AzureChatOpenAI
@@ -19,12 +21,36 @@ is normal). Walks stop on their own after their duration. Check status if
 unsure what the robot is doing. Answer briefly after acting."""
 
 
+def azure_endpoint(raw: str) -> str:
+    """Strip any path from an Azure endpoint URL.
+
+    A Foundry project URL carries a project path that the OpenAI client
+    must not see; it appends its own /openai/deployments/... path.
+    """
+    parts = urlsplit(raw)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def make_agent():
     model = AzureChatOpenAI(
+        azure_endpoint=azure_endpoint(os.environ["AZURE_OPENAI_ENDPOINT"]),
         azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
         api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21"),
     )
     return create_agent(model, ALL_TOOLS, system_prompt=SYSTEM_PROMPT)
+
+
+def _invoke_turn(agent, messages: list) -> list:
+    """Run one agent turn; an Azure error prints and keeps the session alive."""
+    try:
+        result = agent.invoke({"messages": messages})
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return messages
+    messages = result["messages"]
+    print(messages[-1].content)
+    return messages
 
 
 def main():
@@ -43,9 +69,7 @@ def main():
         if not line or line.lower() in ("quit", "exit"):
             break
         messages.append({"role": "user", "content": line})
-        result = agent.invoke({"messages": messages})
-        messages = result["messages"]
-        print(messages[-1].content)
+        messages = _invoke_turn(agent, messages)
 
 
 if __name__ == "__main__":
