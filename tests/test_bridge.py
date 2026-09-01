@@ -1,6 +1,9 @@
 """Tests for the LLM bridge: command state, skills, HTTP server."""
 
+import json
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +24,7 @@ from bridge.state import (  # noqa: E402
 )
 
 from bridge import skills  # noqa: E402
+from bridge.server import start_bridge  # noqa: E402
 
 
 class TestBridgeState:
@@ -178,3 +182,60 @@ class TestSkillsTick:
         assert status["walk_seconds_left"] == pytest.approx(2.0)
         assert status["gesture"] is None
         assert status["fallen"] is False
+
+
+def _post(url, body):
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.status, json.loads(resp.read())
+
+
+class TestBridgeServer:
+    @pytest.fixture()
+    def served_state(self):
+        state = BridgeState()
+        server = start_bridge(state, port=0)  # port 0: OS picks a free port
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        yield state, url
+        server.shutdown()
+
+    def test_walk_roundtrip(self, served_state):
+        state, url = served_state
+        status, body = _post(f"{url}/walk", {"vx": 0.2, "seconds": 2})
+        assert status == 200
+        assert body["vx"] == pytest.approx(0.2)
+        assert state.drain() == [WalkCmd(0.2, 0.0, 0.0, 2.0)]
+
+    def test_status_roundtrip(self, served_state):
+        state, url = served_state
+        state.set_status({"policy": "standing", "fallen": False})
+        with urllib.request.urlopen(f"{url}/status", timeout=5) as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read()) == {"policy": "standing", "fallen": False}
+
+    def test_unknown_gesture_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/gesture", {"name": "backflip"})
+        assert excinfo.value.code == 400
+        assert "error" in json.loads(excinfo.value.read())
+        assert state.drain() == []
+
+    def test_bad_json_returns_400(self, served_state):
+        state, url = served_state
+        req = urllib.request.Request(
+            f"{url}/walk", data=b"not json", method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(req, timeout=5)
+        assert excinfo.value.code == 400
+
+    def test_unknown_route_returns_404(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/dance", {})
+        assert excinfo.value.code == 404
