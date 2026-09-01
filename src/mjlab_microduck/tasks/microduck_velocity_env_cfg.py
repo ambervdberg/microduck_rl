@@ -338,12 +338,16 @@ def make_microduck_velocity_env_cfg(
     cfg.rewards["body_ang_vel"].weight = -0.05
     cfg.rewards["angular_momentum"].weight = -0.02
 
-    # Velocity tracking rewards
-    # linear std tightened sqrt(0.1) -> sqrt(0.04): at std^2=0.1 a 0.07 m/s
-    # shortfall still paid 95% of the term, so undershooting the command was
-    # nearly free and the measured policy walked ~25% slow at every speed.
-    cfg.rewards["track_linear_velocity"].weight = 2.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.04)
+    # Velocity tracking rewards, split in two.
+    # Loose instantaneous term keeps the gait honest step to step; tight EMA
+    # term charges the sustained shortfall, which gait sway cannot fake.
+    cfg.rewards["track_linear_velocity"].weight = 1.0
+    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.1)
+    cfg.rewards["track_linear_velocity_ema"] = RewardTermCfg(
+        func=microduck_mdp.track_linear_velocity_ema,
+        weight=2.0,
+        params={"std": math.sqrt(0.02), "command_name": "twist", "tau_s": 1.0},
+    )
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
