@@ -8,10 +8,11 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 
-VX_MAX = 0.4    # m/s
-VY_MAX = 0.3    # m/s
-WZ_MAX = 1.0    # rad/s
-HEAD_MAX = 1.4  # rad, matches PolicyInference.head_max under --new-cmd-obs
+VX_MAX = 0.4           # m/s
+VY_MAX = 0.3           # m/s
+WZ_MAX = 1.0           # rad/s
+HEAD_PITCH_MAX = 1.1   # rad, trained neck/head_pitch cap
+HEAD_YAW_MAX = 1.4     # rad, trained head_yaw cap
 
 WALK_DEFAULT_S = 3.0
 WALK_MAX_S = 10.0
@@ -67,7 +68,7 @@ class BridgeState:
         return {"vx": cvx, "vy": cvy, "wz": cwz, "seconds": seconds, "clamped": clamped}
 
     def submit_look(self, pitch, yaw) -> dict:
-        cp, cy = _clamp(pitch, HEAD_MAX), _clamp(yaw, HEAD_MAX)
+        cp, cy = _clamp(pitch, HEAD_PITCH_MAX), _clamp(yaw, HEAD_YAW_MAX)
         clamped = (cp, cy) != (float(pitch), float(yaw))
         with self._lock:
             self._pending.append(LookCmd(cp, cy))

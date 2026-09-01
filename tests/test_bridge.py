@@ -12,7 +12,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from bridge.state import (  # noqa: E402
-    HEAD_MAX,
+    HEAD_PITCH_MAX,
+    HEAD_YAW_MAX,
     VX_MAX,
     WALK_DEFAULT_S,
     WALK_MAX_S,
@@ -51,9 +52,15 @@ class TestBridgeState:
     def test_look_clamps_head_angles(self):
         state = BridgeState()
         echo = state.submit_look(-9.0, 0.5)
-        assert echo["pitch"] == pytest.approx(-HEAD_MAX)
+        assert echo["pitch"] == pytest.approx(-HEAD_PITCH_MAX)
         assert echo["yaw"] == pytest.approx(0.5)
-        assert state.drain() == [LookCmd(-HEAD_MAX, 0.5)]
+        assert state.drain() == [LookCmd(-HEAD_PITCH_MAX, 0.5)]
+
+    def test_look_clamps_yaw_to_its_own_max(self):
+        state = BridgeState()
+        echo = state.submit_look(0.0, 9.0)
+        assert echo["yaw"] == pytest.approx(HEAD_YAW_MAX)
+        assert state.drain() == [LookCmd(0.0, HEAD_YAW_MAX)]
 
     def test_unknown_gesture_is_rejected_and_not_queued(self):
         state = BridgeState()

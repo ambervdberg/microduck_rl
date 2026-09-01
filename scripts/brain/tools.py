@@ -58,9 +58,9 @@ def stop() -> str:
 
 @tool
 def look(pitch: float = 0.0, yaw: float = 0.0) -> str:
-    """Point the head and hold it there. Radians, max 1.4.
+    """Point the head and hold it there. Radians.
 
-    pitch: positive looks up. yaw: positive looks left.
+    pitch: positive looks up, max 1.1. yaw: positive looks left, max 1.4.
     """
     return _post("/look", {"pitch": pitch, "yaw": yaw})
 
