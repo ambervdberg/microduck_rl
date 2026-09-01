@@ -55,10 +55,13 @@ class BridgeState:
 
     def submit_walk(self, vx, vy, wz, seconds) -> dict:
         cvx, cvy, cwz = _clamp(vx, VX_MAX), _clamp(vy, VY_MAX), _clamp(wz, WZ_MAX)
+        orig_seconds = seconds
         if seconds is None:
             seconds = WALK_DEFAULT_S
         seconds = max(0.0, min(float(seconds), WALK_MAX_S))
-        clamped = (cvx, cvy, cwz) != (float(vx), float(vy), float(wz))
+        speeds_clamped = (cvx, cvy, cwz) != (float(vx), float(vy), float(wz))
+        seconds_clamped = (orig_seconds is not None) and (seconds != float(orig_seconds))
+        clamped = speeds_clamped or seconds_clamped
         with self._lock:
             self._pending.append(WalkCmd(cvx, cvy, cwz, seconds))
         return {"vx": cvx, "vy": cvy, "wz": cwz, "seconds": seconds, "clamped": clamped}

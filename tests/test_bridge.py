@@ -62,3 +62,15 @@ class TestBridgeState:
         status = state.get_status()
         status["policy"] = "mutated"
         assert state.get_status() == {"policy": "walking"}
+
+    def test_walk_seconds_clamping_sets_clamped_flag(self):
+        state = BridgeState()
+        echo = state.submit_walk(0.1, 0.0, 0.0, 60.0)
+        assert echo["seconds"] == pytest.approx(WALK_MAX_S)
+        assert echo["clamped"] is True
+
+    def test_walk_seconds_none_default_not_clamped(self):
+        state = BridgeState()
+        echo = state.submit_walk(0.1, 0.0, 0.0, None)
+        assert echo["seconds"] == pytest.approx(WALK_DEFAULT_S)
+        assert echo["clamped"] is False
