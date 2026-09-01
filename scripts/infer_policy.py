@@ -832,6 +832,19 @@ class PolicyInference:
             self.data.ctrl[5:9] += self.head_offset
 
 
+def _start_bridge(policy, port):
+    """Start the bridge HTTP server and return its sim-thread command runner."""
+    from bridge.server import start_bridge
+    from bridge.skills import SkillRunner
+    from bridge.state import BridgeState
+
+    bridge_state = BridgeState()
+    start_bridge(bridge_state, port)
+    print(f"Bridge API on http://127.0.0.1:{port} "
+          f"(POST /walk /stop /look /gesture, GET /status)")
+    return SkillRunner(policy, bridge_state)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
@@ -873,6 +886,9 @@ def main():
                         help="Soften foot contact: solref time constant (s) for the foot geoms "
                              "(default sim ~0.02 = stiff/rigid). Larger = softer, to emulate the "
                              "compliant PU sole. e.g. --foot-solref 0.04")
+    parser.add_argument("--bridge", type=int, default=None, metavar="PORT",
+                        help="Serve the LLM bridge HTTP API on 127.0.0.1:PORT "
+                             "(walk/stop/look/gesture/status)")
     args = parser.parse_args()
 
     if not args.walking and not args.standing and not args.sitstand:
@@ -971,6 +987,8 @@ def main():
         roulade_duration=args.roulade_duration,
     )
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
+
+    bridge_runner = _start_bridge(policy, args.bridge) if args.bridge is not None else None
 
     # Set realistic wheel bearing friction for roller inference (must be done
     # programmatically — non-zero frictionloss in the XML breaks training)
@@ -1292,6 +1310,9 @@ def main():
                 policy.update_ground_pick_phase(actual_dt)
                 policy.update_behavior(actual_dt)
                 policy.update_gestures(actual_dt)
+
+                if bridge_runner is not None:
+                    bridge_runner.tick(time.monotonic())
 
                 if policy_enabled:
                     action = policy.infer()
