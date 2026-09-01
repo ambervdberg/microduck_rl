@@ -4547,30 +4547,72 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
 
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         super()._resample_command(env_ids)
-        # Turn-in-place practice: for a fraction of envs, zero the linear velocity
-        # and force a meaningful (away-from-zero) yaw command. Independent uniform
-        # sampling almost never produces "lin≈0, |ang| large" (~2% of samples), so
-        # spinning on the spot was effectively untrained → slow/unstable real-robot
-        # turning. Mirrors the base rel_forward_envs mechanism.
-        p = getattr(self.cfg, "rel_turn_in_place_envs", 0.0)
-        if p <= 0.0:
+        self._apply_command_buckets(env_ids)
+
+    def _apply_command_buckets(self, env_ids: torch.Tensor) -> None:
+        """Overwrite a slice of the freshly sampled commands with rare regions.
+
+        Independent uniform sampling almost never produces "spin on the spot",
+        "walk slowly" or "turn slowly": each is ~2% of the draw, so the policy
+        averages them into "stand still" and they stay untrained. One uniform
+        draw per env partitions the buckets, so they never overlap each other.
+        """
+        turn_frac = getattr(self.cfg, "rel_turn_in_place_envs", 0.0)
+        low_speed_frac = getattr(self.cfg, "rel_low_speed_envs", 0.0)
+        slow_turn_frac = getattr(self.cfg, "rel_slow_turn_envs", 0.0)
+        if turn_frac + low_speed_frac + slow_turn_frac <= 0.0:
             return
-        r = torch.empty(len(env_ids), device=self.device)
-        turn_ids = env_ids[r.uniform_(0.0, 1.0) < p]
-        if len(turn_ids) == 0:
+
+        u = torch.empty(len(env_ids), device=self.device).uniform_(0.0, 1.0)
+        low_speed_edge = turn_frac + low_speed_frac
+        slow_turn_edge = low_speed_edge + slow_turn_frac
+
+        self._command_turn_in_place(env_ids[u < turn_frac])
+        self._command_low_speed(env_ids[(u >= turn_frac) & (u < low_speed_edge)])
+        self._command_slow_turn(env_ids[(u >= low_speed_edge) & (u < slow_turn_edge)])
+
+    def _command_turn_in_place(self, ids: torch.Tensor) -> None:
+        """Spin on the spot: lin = 0, |ang| ∈ [0.4·max, max]."""
+        if len(ids) == 0:
             return
-        self.vel_command_b[turn_ids, 0] = 0.0
-        self.vel_command_b[turn_ids, 1] = 0.0
         lo, hi = self.cfg.ranges.ang_vel_z
         maxr = max(abs(lo), abs(hi))
-        rr = torch.empty(len(turn_ids), device=self.device)
-        sign = torch.where(rr.uniform_(0.0, 1.0) < 0.5, -1.0, 1.0)
-        mag = torch.empty(len(turn_ids), device=self.device).uniform_(0.4 * maxr, maxr)
-        self.vel_command_b[turn_ids, 2] = sign * mag
-        # These envs must actually turn — un-mark them as standing (which would
-        # zero the command) and refresh the world-frame reference copy.
-        self.is_standing_env[turn_ids] = False
-        self.vel_command_w[turn_ids] = self.vel_command_b[turn_ids]
+        self.vel_command_b[ids, 0] = 0.0
+        self.vel_command_b[ids, 1] = 0.0
+        self.vel_command_b[ids, 2] = self._signed_magnitude(len(ids), 0.4 * maxr, maxr)
+        self._activate(ids)
+
+    def _command_low_speed(self, ids: torch.Tensor) -> None:
+        """Walk slowly straight: |vx| in the low-speed range, lateral/yaw zero."""
+        if len(ids) == 0:
+            return
+        lo, hi = getattr(self.cfg, "low_speed_x_range", (0.05, 0.18))
+        self.vel_command_b[ids, 0] = self._signed_magnitude(len(ids), lo, hi)
+        self.vel_command_b[ids, 1] = 0.0
+        self.vel_command_b[ids, 2] = 0.0
+        self._activate(ids)
+
+    def _command_slow_turn(self, ids: torch.Tensor) -> None:
+        """Turn slowly on the spot: lin = 0, |ang| in the slow-turn range."""
+        if len(ids) == 0:
+            return
+        lo, hi = getattr(self.cfg, "slow_turn_ang_range", (0.10, 0.40))
+        self.vel_command_b[ids, 0] = 0.0
+        self.vel_command_b[ids, 1] = 0.0
+        self.vel_command_b[ids, 2] = self._signed_magnitude(len(ids), lo, hi)
+        self._activate(ids)
+
+    def _signed_magnitude(self, n: int, lo: float, hi: float) -> torch.Tensor:
+        """n samples of uniform magnitude in [lo, hi] with a random sign."""
+        mag = torch.empty(n, device=self.device).uniform_(lo, hi)
+        coin = torch.empty(n, device=self.device).uniform_(0.0, 1.0)
+        return torch.where(coin < 0.5, -1.0, 1.0) * mag
+
+    def _activate(self, ids: torch.Tensor) -> None:
+        """A bucketed env must actually move: un-mark it as standing (which
+        would zero the command) and refresh the world-frame reference copy."""
+        self.is_standing_env[ids] = False
+        self.vel_command_w[ids] = self.vel_command_b[ids]
 
     def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
         batch = visualizer.env_idx
@@ -4605,9 +4647,15 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
 
 @_dataclass(kw_only=True)
 class VelocityCommandCommandOnlyCfg(UniformVelocityCommandCfg):
-    # Fraction of envs commanded to turn in place (lin=0, |ang| forced to
-    # [0.4·max, max]) each resample. 0 = disabled (base uniform sampling only).
+    # Disjoint slices of one draw per resample; 0 = disabled for that bucket.
+    # Turn in place: lin=0, |ang| forced to [0.4·max, max].
     rel_turn_in_place_envs: float = 0.0
+    # Low speed: |lin_vel_x| in low_speed_x_range, lateral and yaw zero.
+    rel_low_speed_envs: float = 0.0
+    low_speed_x_range: tuple[float, float] = (0.05, 0.18)
+    # Slow turn in place: lin=0, |ang| in slow_turn_ang_range.
+    rel_slow_turn_envs: float = 0.0
+    slow_turn_ang_range: tuple[float, float] = (0.10, 0.40)
 
     def build(self, env: ManagerBasedRlEnv) -> "VelocityCommandCommandOnly":
         return VelocityCommandCommandOnly(self, env)

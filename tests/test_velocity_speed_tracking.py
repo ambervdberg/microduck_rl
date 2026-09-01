@@ -1,9 +1,13 @@
-"""Split linear-velocity tracking: loose instantaneous term + tight EMA term.
+"""Linear-velocity tracking: tight std on the instantaneous velocity.
 
-A tight std on the INSTANTANEOUS velocity made standing still score better
-than a slow gait (the gait's own sway is larger than the target), so the
-policy froze below ~0.18 m/s. The EMA term averages the sway out over 1 s and
-charges only the sustained shortfall, so a tight std is safe there.
+The tight instantaneous term gave the best speed accuracy measured (92-99% of
+commanded between 0.2 and 0.45 m/s) and is what the cfg wires. Its deadzone
+below ~0.18 m/s is a coverage problem, fixed by the small-command sampling
+buckets, not by loosening the term.
+
+``track_linear_velocity_ema`` is a recorded negative result: measuring against
+a 1 s EMA removed the deadzone but smeared credit assignment into a 40%
+overshoot. The function and its unit tests stay; the cfg no longer wires it.
 """
 
 import math
@@ -129,17 +133,13 @@ def test_velocity_cfg_wiring():
 
     cfg = make_microduck_velocity_env_cfg()
 
-    ema = cfg.rewards["track_linear_velocity_ema"]
-    assert ema.func is microduck_mdp.track_linear_velocity_ema
-    assert ema.weight == 2.0
-    assert ema.params["std"] == math.sqrt(0.02)
-    assert ema.params["tau_s"] == 1.0
-    assert ema.params["command_name"] == "twist"
-
-    # Instantaneous term reverted to the loose std that lets a gait score.
+    # Tight instantaneous term: the run that tracked speed best.
     inst = cfg.rewards["track_linear_velocity"]
-    assert inst.weight == 1.0
-    assert inst.params["std"] == math.sqrt(0.1)
+    assert inst.weight == 2.0
+    assert inst.params["std"] == math.sqrt(0.04)
+
+    # EMA term unwired — kept in mdp.py as a documented negative result only.
+    assert "track_linear_velocity_ema" not in cfg.rewards
 
     # Angular tracking untouched.
     ang = cfg.rewards["track_angular_velocity"]
