@@ -1,6 +1,7 @@
 """Tool tests against a stub bridge server (stdlib only, no LLM)."""
 
 import json
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,3 +62,16 @@ def test_gesture_and_stop_and_look(stub_bridge):
     tools.look.invoke({"pitch": 0.2, "yaw": -0.3})
     paths = [r[1] for r in stub_bridge]
     assert paths == ["/gesture", "/stop", "/look"]
+
+
+def test_status_reports_error_when_bridge_unreachable(monkeypatch):
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    closed_port = sock.getsockname()[1]
+    sock.close()
+    monkeypatch.setenv("BRIDGE_URL", f"http://127.0.0.1:{closed_port}")
+
+    import tools
+    result = tools.status.invoke({})
+
+    assert "error" in json.loads(result)

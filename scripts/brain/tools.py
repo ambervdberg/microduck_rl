@@ -14,14 +14,28 @@ def _bridge_url() -> str:
     return os.environ.get("BRIDGE_URL", "http://127.0.0.1:8630")
 
 
+def _request(method: str, path: str, body: dict | None = None) -> str:
+    """Call the bridge, returning an error string instead of raising.
+
+    A tool must never crash the agent: unreachable bridge or a bad
+    response both come back as {"error": ...} for the model to read.
+    """
+    url = f"{_bridge_url()}{path}"
+    try:
+        resp = requests.request(method, url, json=body, timeout=5)
+        return json.dumps(resp.json())
+    except requests.RequestException as exc:
+        return json.dumps({"error": f"bridge unreachable at {url}: {exc}"})
+    except ValueError as exc:
+        return json.dumps({"error": f"bad response from {url}: {exc}"})
+
+
 def _post(path: str, body: dict) -> str:
-    resp = requests.post(f"{_bridge_url()}{path}", json=body, timeout=5)
-    return json.dumps(resp.json())
+    return _request("POST", path, body)
 
 
 def _get(path: str) -> str:
-    resp = requests.get(f"{_bridge_url()}{path}", timeout=5)
-    return json.dumps(resp.json())
+    return _request("GET", path)
 
 
 @tool
