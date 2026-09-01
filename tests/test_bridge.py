@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -18,6 +19,8 @@ from bridge.state import (  # noqa: E402
     StopCmd,
     WalkCmd,
 )
+
+from bridge import skills  # noqa: E402
 
 
 class TestBridgeState:
@@ -74,3 +77,104 @@ class TestBridgeState:
         echo = state.submit_walk(0.1, 0.0, 0.0, None)
         assert echo["seconds"] == pytest.approx(WALK_DEFAULT_S)
         assert echo["clamped"] is False
+
+
+class FakeGesturePlayer:
+    def __init__(self):
+        self.active_name = None
+
+    def cancel(self):
+        self.active_name = None
+
+
+class FakePolicy:
+    """Mimics the PolicyInference surface the bridge touches."""
+
+    def __init__(self):
+        self.vel_cmd = np.zeros(3, dtype=np.float32)
+        self.head_offset = np.zeros(4, dtype=np.float32)
+        self.current_policy = "standing"
+        self.gesture_player = FakeGesturePlayer()
+        self.started_gestures = []
+        self.command_updates = 0
+
+    def set_vel_cmd(self, vx, vy, wz):
+        self.vel_cmd = np.array([vx, vy, wz], dtype=np.float32)
+        self.current_policy = "walking" if np.linalg.norm(self.vel_cmd) > 0.05 else "standing"
+
+    def _update_command(self):
+        self.command_updates += 1
+
+    def start_gesture(self, key):
+        self.started_gestures.append(key)
+        self.gesture_player.active_name = {"n": "nod yes", "m": "shake no"}[key]
+        return object()
+
+    def get_projected_gravity(self):
+        return np.array([0.0, 0.0, -1.0], dtype=np.float32)
+
+
+class TestSkillsTick:
+    @pytest.fixture(autouse=True)
+    def _fresh_skills(self):
+        skills.reset()
+        yield
+        skills.reset()
+
+    def test_walk_applies_and_expires_to_zero(self):
+        state, policy = BridgeState(), FakePolicy()
+        state.submit_walk(0.2, 0.0, 0.3, 2.0)
+        skills.tick(policy, state, now=100.0)
+        assert policy.vel_cmd.tolist() == pytest.approx([0.2, 0.0, 0.3])
+
+        skills.tick(policy, state, now=101.9)  # still walking
+        assert policy.vel_cmd[0] == pytest.approx(0.2)
+
+        skills.tick(policy, state, now=102.1)  # deadline passed
+        assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
+
+    def test_new_walk_extends_deadline(self):
+        state, policy = BridgeState(), FakePolicy()
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        skills.tick(policy, state, now=100.0)
+        state.submit_walk(0.1, 0.0, 0.0, 5.0)
+        skills.tick(policy, state, now=101.0)
+        skills.tick(policy, state, now=103.0)  # old deadline passed, new one not
+        assert policy.vel_cmd[0] == pytest.approx(0.1)
+
+    def test_stop_zeroes_twist_head_and_gesture(self):
+        state, policy = BridgeState(), FakePolicy()
+        state.submit_walk(0.2, 0.1, 0.0, 5.0)
+        state.submit_look(0.3, -0.2)
+        state.submit_gesture("nod")
+        skills.tick(policy, state, now=100.0)
+        state.submit_stop()
+        skills.tick(policy, state, now=100.1)
+        assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
+        assert policy.head_offset.tolist() == [0.0, 0.0, 0.0, 0.0]
+        assert policy.gesture_player.active_name is None
+
+    def test_look_writes_head_pitch_and_yaw(self):
+        state, policy = BridgeState(), FakePolicy()
+        state.submit_look(0.3, -0.4)
+        skills.tick(policy, state, now=100.0)
+        assert policy.head_offset.tolist() == pytest.approx([0.0, 0.3, -0.4, 0.0])
+        assert policy.command_updates > 0
+
+    def test_gesture_maps_names_to_keys(self):
+        state, policy = BridgeState(), FakePolicy()
+        state.submit_gesture("nod")
+        state.submit_gesture("shake")
+        skills.tick(policy, state, now=100.0)
+        assert policy.started_gestures == ["n", "m"]
+
+    def test_status_snapshot_content(self):
+        state, policy = BridgeState(), FakePolicy()
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        skills.tick(policy, state, now=100.0)
+        status = state.get_status()
+        assert status["policy"] == "walking"
+        assert status["twist"] == pytest.approx([0.2, 0.0, 0.0])
+        assert status["walk_seconds_left"] == pytest.approx(2.0)
+        assert status["gesture"] is None
+        assert status["fallen"] is False
