@@ -139,11 +139,10 @@ def test_velocity_cfg_wiring():
 
     cfg = make_microduck_velocity_env_cfg()
 
-    # Linear tracking: weight held, std tightened past run 7 to pull the
-    # achieved speed up off ~70% of commanded.
+    # Linear tracking untouched: run 7's setting, the only accurate one.
     lin = cfg.rewards["track_linear_velocity"]
     assert lin.weight == 2.0
-    assert lin.params["std"] == math.sqrt(0.025)
+    assert lin.params["std"] == math.sqrt(0.04)
 
     # Instantaneous angular term kept, but too weak to outbid walking.
     inst = cfg.rewards["track_angular_velocity"]

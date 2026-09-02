@@ -133,11 +133,11 @@ def test_velocity_cfg_wiring():
 
     cfg = make_microduck_velocity_env_cfg()
 
-    # Tight instantaneous term, tightened again once the angular sway tax
-    # was removed and the speed shortfall was the only thing left.
+    # Tight instantaneous term: the run that tracked speed best. Run 12 tried
+    # sqrt(0.025) and lost the low-speed range for no speed gain.
     inst = cfg.rewards["track_linear_velocity"]
     assert inst.weight == 2.0
-    assert inst.params["std"] == math.sqrt(0.025)
+    assert inst.params["std"] == math.sqrt(0.04)
 
     # EMA term unwired — kept in mdp.py as a documented negative result only.
     assert "track_linear_velocity_ema" not in cfg.rewards
