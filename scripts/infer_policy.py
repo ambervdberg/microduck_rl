@@ -838,10 +838,13 @@ def _start_bridge(policy, port):
     from bridge.skills import SkillRunner
     from bridge.state import BridgeState
 
+    # Shared queue between the HTTP thread and the sim thread.
     bridge_state = BridgeState()
     start_bridge(bridge_state, port)
+
     print(f"Bridge API on http://127.0.0.1:{port} "
           f"(POST /walk /stop /look /gesture, GET /status)")
+
     return SkillRunner(policy, bridge_state)
 
 
@@ -988,7 +991,11 @@ def main():
     )
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
-    bridge_runner = _start_bridge(policy, args.bridge) if args.bridge is not None else None
+    # Bridge is opt-in: only start it when --bridge names a port.
+    if args.bridge is not None:
+        bridge_runner = _start_bridge(policy, args.bridge)
+    else:
+        bridge_runner = None
 
     # Set realistic wheel bearing friction for roller inference (must be done
     # programmatically — non-zero frictionloss in the XML breaks training)

@@ -32,12 +32,14 @@ def azure_endpoint(raw: str) -> str:
 
 
 def make_agent():
+    """Build the LangChain agent, wired to Azure OpenAI and the bridge tools."""
     model = AzureChatOpenAI(
         azure_endpoint=azure_endpoint(os.environ["AZURE_OPENAI_ENDPOINT"]),
         azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
         api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21"),
     )
+
     return create_agent(model, ALL_TOOLS, system_prompt=SYSTEM_PROMPT)
 
 
@@ -45,31 +47,58 @@ def _invoke_turn(agent, messages: list) -> list:
     """Run one agent turn; an Azure error prints and keeps the session alive."""
     try:
         result = agent.invoke({"messages": messages})
+
     except Exception as exc:
         print(f"Error: {exc}")
         return messages
+
     messages = result["messages"]
     print(messages[-1].content)
+
     return messages
 
 
-def main():
+def _check_env() -> None:
+    """Exit early if any required Azure environment variable is missing."""
     for var in ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_DEPLOYMENT"):
         if not os.environ.get(var):
             sys.exit(f"Missing environment variable: {var}")
 
-    agent = make_agent()
+
+def _read_line() -> str | None:
+    """Read one line of user input; None on EOF, interrupt, or quit."""
+    try:
+        line = input("> ").strip()
+
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if not line or line.lower() in ("quit", "exit"):
+        return None
+
+    return line
+
+
+def _chat_loop(agent) -> None:
+    """Read commands from the terminal and run each through the agent."""
     messages = []
     print("Microduck brain ready. Type what the robot should do, or 'quit'.")
+
     while True:
-        try:
-            line = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
+        line = _read_line()
+
+        if line is None:
             break
-        if not line or line.lower() in ("quit", "exit"):
-            break
+
         messages.append({"role": "user", "content": line})
         messages = _invoke_turn(agent, messages)
+
+
+def main():
+    """Check env vars, build the agent, and run the terminal chat loop."""
+    _check_env()
+    agent = make_agent()
+    _chat_loop(agent)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,14 @@ class SkillRunner:
         self._state = state
         self._walk_deadline: float | None = None
 
+        # Command class to the bound handler that applies it.
+        self._handlers = {
+            WalkCmd: self._walk,
+            StopCmd: self._stop,
+            LookCmd: self._look,
+            GestureCmd: self._gesture,
+        }
+
     def tick(self, now: float) -> None:
         """Drain pending commands, apply them, expire walks, refresh status."""
         for cmd in self._state.drain():
@@ -29,23 +37,33 @@ class SkillRunner:
         self._publish_status(now)
 
     def _apply(self, cmd, now: float) -> None:
-        """Apply a single command from the queue."""
-        if isinstance(cmd, WalkCmd):
-            self._policy.set_vel_cmd(cmd.vx, cmd.vy, cmd.wz)
-            self._walk_deadline = now + cmd.seconds
-        elif isinstance(cmd, StopCmd):
-            self._walk_deadline = None
-            self._policy.gesture_player.cancel()
-            self._policy.head_offset[:] = 0.0
-            self._policy.set_vel_cmd(0.0, 0.0, 0.0)
-            self._policy._update_command()
-        elif isinstance(cmd, LookCmd):
-            self._policy.gesture_player.cancel()
-            self._policy.head_offset[1] = cmd.pitch
-            self._policy.head_offset[2] = cmd.yaw
-            self._policy._update_command()
-        elif isinstance(cmd, GestureCmd):
-            self._policy.start_gesture(GESTURE_KEYS[cmd.name])
+        """Dispatch one queued command to its handler."""
+        handler = self._handlers[type(cmd)]
+        handler(cmd, now)
+
+    def _walk(self, cmd: WalkCmd, now: float) -> None:
+        """Start walking and arm the deadline that stops it."""
+        self._policy.set_vel_cmd(cmd.vx, cmd.vy, cmd.wz)
+        self._walk_deadline = now + cmd.seconds
+
+    def _stop(self, _cmd: StopCmd, _now: float) -> None:
+        """Cancel any walk and gesture, and zero the head and velocity."""
+        self._walk_deadline = None
+        self._policy.gesture_player.cancel()
+        self._policy.head_offset[:] = 0.0
+        self._policy.set_vel_cmd(0.0, 0.0, 0.0)
+        self._policy._update_command()
+
+    def _look(self, cmd: LookCmd, _now: float) -> None:
+        """Cancel any gesture and hold the head at the given pose."""
+        self._policy.gesture_player.cancel()
+        self._policy.head_offset[1] = cmd.pitch
+        self._policy.head_offset[2] = cmd.yaw
+        self._policy._update_command()
+
+    def _gesture(self, cmd: GestureCmd, _now: float) -> None:
+        """Play the named gesture."""
+        self._policy.start_gesture(GESTURE_KEYS[cmd.name])
 
     def _expire_walk(self, now: float) -> None:
         """Zero velocity if walk deadline has passed."""

@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 
 
 def _bridge_url() -> str:
+    """Base URL of the bridge, from the environment or the sim default."""
     return os.environ.get("BRIDGE_URL", "http://127.0.0.1:8630")
 
 
@@ -21,20 +22,27 @@ def _request(method: str, path: str, body: dict | None = None) -> str:
     response both come back as {"error": ...} for the model to read.
     """
     url = f"{_bridge_url()}{path}"
+
     try:
         resp = requests.request(method, url, json=body, timeout=5)
         return json.dumps(resp.json())
+
+    # Bridge down, refused connection, or the request timed out.
     except requests.RequestException as exc:
         return json.dumps({"error": f"bridge unreachable at {url}: {exc}"})
+
+    # Bridge replied, but the body was not valid JSON.
     except ValueError as exc:
         return json.dumps({"error": f"bad response from {url}: {exc}"})
 
 
 def _post(path: str, body: dict) -> str:
+    """POST a command body to the bridge."""
     return _request("POST", path, body)
 
 
 def _get(path: str) -> str:
+    """GET a bridge route with no body."""
     return _request("GET", path)
 
 
