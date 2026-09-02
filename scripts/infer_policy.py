@@ -832,6 +832,22 @@ class PolicyInference:
             self.data.ctrl[5:9] += self.head_offset
 
 
+def _start_bridge(policy, port, control_dt):
+    """Start the bridge HTTP server and return its sim-thread command runner."""
+    from bridge.server import start_bridge
+    from bridge.skills import SkillRunner
+    from bridge.state import BridgeState
+
+    # Shared queue between the HTTP thread and the sim thread.
+    bridge_state = BridgeState(policy)
+    start_bridge(bridge_state, port)
+
+    print(f"Bridge API on http://127.0.0.1:{port} "
+          f"(POST /walk /stop /look /gesture, GET /status)")
+
+    return SkillRunner(policy, bridge_state, control_dt)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
     parser.add_argument("--scene", type=str, default=None,
@@ -876,6 +892,9 @@ def main():
                         help="Soften foot contact: solref time constant (s) for the foot geoms "
                              "(default sim ~0.02 = stiff/rigid). Larger = softer, to emulate the "
                              "compliant PU sole. e.g. --foot-solref 0.04")
+    parser.add_argument("--bridge", type=int, default=None, metavar="PORT",
+                        help="Serve the LLM bridge HTTP API on 127.0.0.1:PORT "
+                             "(walk/stop/look/gesture/status)")
     args = parser.parse_args()
 
     if not args.walking and not args.standing and not args.sitstand:
@@ -884,6 +903,8 @@ def main():
         parser.error("--sitstand policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and not args.new_cmd_obs:
         parser.error("--kick-left/--kick-right/--roulade policies use the unified 13D command obs (61D); add --new-cmd-obs")
+    if args.bridge is not None and not args.new_cmd_obs:
+        parser.error("--bridge writes the unified 13D command block (61D obs), so add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and args.roller:
         parser.error("kick/roulade policies are trained on the walking robot, not the roller model")
 
@@ -1062,6 +1083,13 @@ def main():
     decimation = 4
     control_step_count = 0
     control_dt = decimation * model.opt.timestep
+
+    # Bridge is opt-in: only start it when --bridge names a port. Started here
+    # so it clamps against the envelope installed above and counts sim time.
+    if args.bridge is not None:
+        bridge_runner = _start_bridge(policy, args.bridge, control_dt)
+    else:
+        bridge_runner = None
 
     # Rolling buffer of trunk world-frame xy velocity over the last 1 s, used
     # to print a running average so we can compare commanded vs achieved speed.
@@ -1297,6 +1325,9 @@ def main():
                 policy.update_ground_pick_phase(actual_dt)
                 policy.update_behavior(actual_dt)
                 policy.update_gestures(actual_dt)
+
+                if bridge_runner is not None:
+                    bridge_runner.tick(policy_enabled)
 
                 if policy_enabled:
                     action = policy.infer()
