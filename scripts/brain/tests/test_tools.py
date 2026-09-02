@@ -75,3 +75,65 @@ def test_status_reports_error_when_bridge_unreachable(monkeypatch):
     result = tools.status.invoke({})
 
     assert "error" in json.loads(result)
+
+
+@pytest.fixture()
+def stub_bridge_non_json(monkeypatch):
+    """Replies 200 with a body that is not JSON."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass
+
+        def do_GET(self):
+            payload = b"not json"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("BRIDGE_URL", f"http://127.0.0.1:{server.server_address[1]}")
+    yield
+    server.shutdown()
+
+
+def test_status_reports_bad_reply_with_status_code_on_non_json_body(stub_bridge_non_json):
+    import tools
+    result = json.loads(tools.status.invoke({}))
+
+    assert "bad reply" in result["error"]
+    assert "200" in result["error"]
+
+
+@pytest.fixture()
+def stub_bridge_error_status(monkeypatch):
+    """Replies 400 with a JSON body carrying an error key."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            payload = json.dumps({"error": "speed too high"}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("BRIDGE_URL", f"http://127.0.0.1:{server.server_address[1]}")
+    yield
+    server.shutdown()
+
+
+def test_walk_surfaces_bridge_error_body_on_non_2xx_status(stub_bridge_error_status):
+    import tools
+    result = json.loads(tools.walk.invoke({"vx": 5.0}))
+
+    assert result["error"] == "speed too high"

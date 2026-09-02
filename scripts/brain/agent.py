@@ -15,7 +15,7 @@ from langchain_openai import AzureChatOpenAI
 from tools import ALL_TOOLS
 
 SYSTEM_PROMPT = """You control Microduck, a small bipedal robot, through tools.
-The robot balances itself; you only choose what it does.
+The robot balances itself. You only choose what it does.
 Speeds are capped by the bridge, so prefer moderate values (walking 0.2 m/s
 is normal). Walks stop on their own after their duration. Check status if
 unsure what the robot is doing. Answer briefly after acting."""
@@ -25,7 +25,7 @@ def azure_endpoint(raw: str) -> str:
     """Strip any path from an Azure endpoint URL.
 
     A Foundry project URL carries a project path that the OpenAI client
-    must not see; it appends its own /openai/deployments/... path.
+    must not see. It appends its own /openai/deployments/... path.
     """
     parts = urlsplit(raw)
     return f"{parts.scheme}://{parts.netloc}"
@@ -44,16 +44,20 @@ def make_agent():
 
 
 def _invoke_turn(agent, messages: list) -> list:
-    """Run one agent turn; an Azure error prints and keeps the session alive."""
+    """Run one agent turn.
+
+    On failure, print the error and drop the pending user message so
+    history stays consistent with what the model actually saw.
+    """
     try:
         result = agent.invoke({"messages": messages})
 
     except Exception as exc:
         print(f"Error: {exc}")
-        return messages
+        return messages[:-1]
 
     messages = result["messages"]
-    print(messages[-1].content)
+    print(messages[-1].text)
 
     return messages
 
@@ -66,17 +70,22 @@ def _check_env() -> None:
 
 
 def _read_line() -> str | None:
-    """Read one line of user input; None on EOF, interrupt, or quit."""
-    try:
-        line = input("> ").strip()
+    """Read one non-empty line of user input, reprompting on blank lines.
 
-    except (EOFError, KeyboardInterrupt):
-        return None
+    Returns None on EOF, interrupt, or 'quit'/'exit'.
+    """
+    while True:
+        try:
+            line = input("> ").strip()
 
-    if not line or line.lower() in ("quit", "exit"):
-        return None
+        except (EOFError, KeyboardInterrupt):
+            return None
 
-    return line
+        if line.lower() in ("quit", "exit"):
+            return None
+
+        if line:
+            return line
 
 
 def _chat_loop(agent) -> None:

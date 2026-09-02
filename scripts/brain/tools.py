@@ -18,22 +18,28 @@ def _bridge_url() -> str:
 def _request(method: str, path: str, body: dict | None = None) -> str:
     """Call the bridge, returning an error string instead of raising.
 
-    A tool must never crash the agent: unreachable bridge or a bad
-    response both come back as {"error": ...} for the model to read.
+    A tool must never crash the agent: unreachable bridge, a non-JSON
+    reply, or a non-2xx status all come back as {"error": ...}.
     """
     url = f"{_bridge_url()}{path}"
 
     try:
         resp = requests.request(method, url, json=body, timeout=5)
-        return json.dumps(resp.json())
+        data = resp.json()
+
+    # Bridge replied, but the body was not valid JSON.
+    except requests.exceptions.JSONDecodeError as exc:
+        return json.dumps({"error": f"bad reply from {url} (status {resp.status_code}): {exc}"})
 
     # Bridge down, refused connection, or the request timed out.
     except requests.RequestException as exc:
         return json.dumps({"error": f"bridge unreachable at {url}: {exc}"})
 
-    # Bridge replied, but the body was not valid JSON.
-    except ValueError as exc:
-        return json.dumps({"error": f"bad response from {url}: {exc}"})
+    if not 200 <= resp.status_code < 300:
+        error = data.get("error") if isinstance(data, dict) else None
+        return json.dumps({"error": error or f"bridge returned status {resp.status_code}"})
+
+    return json.dumps(data)
 
 
 def _post(path: str, body: dict) -> str:
