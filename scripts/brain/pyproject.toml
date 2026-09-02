@@ -1,0 +1,13 @@
+[project]
+name = "microduck-brain"
+version = "0.1.0"
+description = "LangChain terminal agent that drives Microduck through the bridge API"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=1.0",
+    "langchain-openai>=1.0",
+    "requests>=2.32",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
