@@ -352,12 +352,13 @@ def make_microduck_velocity_env_cfg(
     cfg.rewards["angular_momentum"].weight = -0.02
 
     # Linear velocity tracking: tight std on the INSTANTANEOUS velocity.
-    # std^2 = 0.04 gave the best speed accuracy measured (92-99% of commanded
-    # between 0.2 and 0.45 m/s). Its deadzone below ~0.18 m/s is addressed by
-    # the LOW_SPEED_FRACTION / SLOW_TURN_FRACTION command buckets, not by
-    # loosening this term (an EMA variant traded the freeze for a 40% overshoot).
+    # std^2 = 0.025. At 0.04 the policy settled at ~70% of commanded across the
+    # whole range: a 0.085 m/s shortfall at cmd 0.30 still paid 82% of the term,
+    # too flat to pull on. The deadzone this once caused below ~0.18 m/s came
+    # from the angular sway tax, now removed by the angular split, not from this
+    # std. An EMA variant of this term is a recorded failure (40% overshoot).
     cfg.rewards["track_linear_velocity"].weight = 2.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.04)
+    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.025)
     # Angular tracking is split. A walking gait sways at ~1.0 rad/s in yaw, so
     # the instantaneous term pays a frozen policy more than any walk; it stays
     # only at low weight to discourage wild spinning. The bulk of the mass sits
