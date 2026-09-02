@@ -358,8 +358,18 @@ def make_microduck_velocity_env_cfg(
     # loosening this term (an EMA variant traded the freeze for a 40% overshoot).
     cfg.rewards["track_linear_velocity"].weight = 2.0
     cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.04)
-    cfg.rewards["track_angular_velocity"].weight = 2.0
+    # Angular tracking is split. A walking gait sways at ~1.0 rad/s in yaw, so
+    # the instantaneous term pays a frozen policy more than any walk; it stays
+    # only at low weight to discourage wild spinning. The bulk of the mass sits
+    # on a 0.5 s EMA, which cancels the sway and charges the sustained rate.
+    cfg.rewards["track_angular_velocity"].weight = 0.5
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
+
+    cfg.rewards["track_angular_velocity_ema"] = RewardTermCfg(
+        func=microduck_mdp.track_angular_velocity_ema,
+        weight=2.0,
+        params={"command_name": "twist", "std": math.sqrt(0.05), "tau_s": 0.5},
+    )
 
     # Action smoothness: stage-0 value; the action_rate_weight curriculum below
     # ramps it -0.1 → -1.0 by iter 1500.

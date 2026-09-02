@@ -216,6 +216,7 @@ def make_microduck_roulade_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     for name in [
         "track_linear_velocity",
         "track_angular_velocity",
+        "track_angular_velocity_ema",
         "air_time",
         "foot_clearance",
         "foot_swing_height",

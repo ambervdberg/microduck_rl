@@ -141,7 +141,7 @@ def test_velocity_cfg_wiring():
     # EMA term unwired — kept in mdp.py as a documented negative result only.
     assert "track_linear_velocity_ema" not in cfg.rewards
 
-    # Angular tracking untouched.
+    # Angular tracking is split; see tests/test_velocity_angular_tracking.py.
     ang = cfg.rewards["track_angular_velocity"]
-    assert ang.weight == 2.0
+    assert ang.weight == 0.5
     assert ang.params["std"] == math.sqrt(0.5)

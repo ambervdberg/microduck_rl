@@ -168,6 +168,7 @@ def make_microduck_ground_pick_env_cfg(play: bool = False, rough: bool = False) 
     for name in [
         "track_linear_velocity",
         "track_angular_velocity",
+        "track_angular_velocity_ema",
         "air_time",
         "foot_clearance",
         "foot_swing_height",

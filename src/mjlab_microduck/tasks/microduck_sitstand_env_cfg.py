@@ -230,6 +230,7 @@ def make_microduck_sitstand_env_cfg(
     for name in [
         "track_linear_velocity",
         "track_angular_velocity",
+        "track_angular_velocity_ema",
         "air_time",
         "foot_clearance",
         "foot_swing_height",

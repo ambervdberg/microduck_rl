@@ -544,6 +544,47 @@ def track_linear_velocity_ema(
     return torch.exp(-error / std**2)
 
 
+def track_angular_velocity_ema(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str = "twist",
+    tau_s: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Gaussian reward on the EMA of body-frame angular velocity vs the command.
+
+    Companion to mjlab's ``track_angular_velocity``, which scores the
+    INSTANTANEOUS rate. A stepping gait sways: measured yaw rate oscillates at
+    ~1.0 rad/s while walking, so against a commanded 0 the instantaneous term
+    pays a frozen policy the maximum and charges a slow walk for physics the
+    gait cannot avoid. Averaging over ``tau_s`` cancels the sway and prices only
+    the sustained (DC) rate, which is what "turns when told" and "drifts off
+    heading" mean.
+
+    Reads ``root_link_ang_vel_b`` and forms the same error as the instantaneous
+    term: z against the command, xy against zero, both on the EMA.
+
+    The EMA is per-env state, zeroed on episode reset so an episode never
+    inherits the previous episode's average.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    actual = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+
+    if not hasattr(env, "_ang_vel_ema") or env._ang_vel_ema.shape != actual.shape:
+        env._ang_vel_ema = torch.zeros_like(actual)
+    # Freshly reset envs: drop the previous episode's average.
+    env._ang_vel_ema[env.episode_length_buf <= 1] = 0.0
+
+    alpha = 1.0 - math.exp(-float(env.step_dt) / max(tau_s, 1e-6))
+    env._ang_vel_ema = (1.0 - alpha) * env._ang_vel_ema + alpha * actual
+
+    z_error = torch.square(command[:, 2] - env._ang_vel_ema[:, 2])
+    xy_error = torch.sum(torch.square(env._ang_vel_ema[:, :2]), dim=1)
+    return torch.exp(-(z_error + xy_error) / std**2)
+
+
 def _fallen_mask(
     env: ManagerBasedRlEnv,
     asset,
