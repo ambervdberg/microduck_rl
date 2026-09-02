@@ -1,8 +1,11 @@
 """Tests for the LLM bridge: command state, skills, HTTP server."""
 
+import contextlib
 import json
+import socket
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -11,10 +14,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+from gestures import default_gestures  # noqa: E402
+
 from bridge.state import (  # noqa: E402
+    BRAIN_TIMEOUT_S,
     HEAD_PITCH_MAX,
     HEAD_YAW_MAX,
-    VX_MAX,
     WALK_DEFAULT_S,
     WALK_MAX_S,
     BridgeState,
@@ -27,78 +32,31 @@ from bridge.state import (  # noqa: E402
 from bridge import skills  # noqa: E402
 from bridge.server import start_bridge  # noqa: E402
 
-
-class TestBridgeState:
-    def test_walk_is_queued_and_drained_in_order(self):
-        state = BridgeState()
-        state.submit_walk(0.2, 0.0, 0.0, 2.0)
-        state.submit_stop()
-        drained = state.drain()
-        assert drained == [WalkCmd(0.2, 0.0, 0.0, 2.0), StopCmd()]
-        assert state.drain() == []
-
-    def test_walk_speeds_are_clamped_and_reported(self):
-        state = BridgeState()
-        echo = state.submit_walk(9.0, 0.0, 0.0, 2.0)
-        assert echo["vx"] == pytest.approx(VX_MAX)
-        assert echo["clamped"] is True
-        assert state.drain() == [WalkCmd(VX_MAX, 0.0, 0.0, 2.0)]
-
-    def test_walk_duration_default_and_max(self):
-        state = BridgeState()
-        assert state.submit_walk(0.1, 0.0, 0.0, None)["seconds"] == WALK_DEFAULT_S
-        assert state.submit_walk(0.1, 0.0, 0.0, 60.0)["seconds"] == WALK_MAX_S
-
-    def test_look_clamps_head_angles(self):
-        state = BridgeState()
-        echo = state.submit_look(-9.0, 0.5)
-        assert echo["pitch"] == pytest.approx(-HEAD_PITCH_MAX)
-        assert echo["yaw"] == pytest.approx(0.5)
-        assert state.drain() == [LookCmd(-HEAD_PITCH_MAX, 0.5)]
-
-    def test_look_clamps_yaw_to_its_own_max(self):
-        state = BridgeState()
-        echo = state.submit_look(0.0, 9.0)
-        assert echo["yaw"] == pytest.approx(HEAD_YAW_MAX)
-        assert state.drain() == [LookCmd(0.0, HEAD_YAW_MAX)]
-
-    def test_walk_with_nan_speed_raises_and_queues_nothing(self):
-        state = BridgeState()
-        with pytest.raises(ValueError):
-            state.submit_walk(float("nan"), 0.0, 0.0, 1.0)
-        assert state.drain() == []
-
-    def test_unknown_gesture_is_rejected_and_not_queued(self):
-        state = BridgeState()
-        with pytest.raises(ValueError):
-            state.submit_gesture("backflip")
-        assert state.drain() == []
-        state.submit_gesture("nod")
-        assert state.drain() == [GestureCmd("nod")]
-
-    def test_status_roundtrip_returns_a_copy(self):
-        state = BridgeState()
-        state.set_status({"policy": "walking"})
-        status = state.get_status()
-        status["policy"] = "mutated"
-        assert state.get_status() == {"policy": "walking"}
-
-    def test_walk_seconds_clamping_sets_clamped_flag(self):
-        state = BridgeState()
-        echo = state.submit_walk(0.1, 0.0, 0.0, 60.0)
-        assert echo["seconds"] == pytest.approx(WALK_MAX_S)
-        assert echo["clamped"] is True
-
-    def test_walk_seconds_none_default_not_clamped(self):
-        state = BridgeState()
-        echo = state.submit_walk(0.1, 0.0, 0.0, None)
-        assert echo["seconds"] == pytest.approx(WALK_DEFAULT_S)
-        assert echo["clamped"] is False
+CONTROL_DT = 0.02  # 50 Hz, the rate infer_policy.py calls tick() at
 
 
 class FakeGesturePlayer:
-    def __init__(self):
+    """Mimics GesturePlayer: the real key table, one gesture at a time."""
+
+    def __init__(self, gestures=None):
+        self._gestures = default_gestures() if gestures is None else gestures
         self.active_name = None
+
+    @property
+    def is_playing(self):
+        return self.active_name is not None
+
+    def keys(self):
+        return tuple(self._gestures)
+
+    def trigger(self, key):
+        cfg = self._gestures.get(key)
+
+        if cfg is None:
+            return None
+
+        self.active_name = cfg.name
+        return cfg
 
     def cancel(self):
         self.active_name = None
@@ -107,109 +65,332 @@ class FakeGesturePlayer:
 class FakePolicy:
     """Mimics the PolicyInference surface the bridge touches."""
 
-    def __init__(self, gravity_z: float = -1.0):
+    def __init__(self, gravity_z: float = -1.0, walking: bool = True, gestures=None):
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.head_offset = np.zeros(4, dtype=np.float32)
+        self.command = np.zeros(13, dtype=np.float32)
         self.current_policy = "standing"
-        self.gesture_player = FakeGesturePlayer()
+        self.gesture_player = FakeGesturePlayer(gestures)
         self.started_gestures = []
         self.command_updates = 0
         self.gravity_z = gravity_z
+        self.walking_session = object() if walking else None
+        self.switch_threshold = 0.05
+        self.vel_max_x = 0.3
+        self.vel_min_x = -0.3
+        self.vel_max_y = 0.2
+        self.vel_min_y = -0.2
+        self.vel_max_ang = 1.5
+        self.head_max = 1.4
 
     def set_vel_cmd(self, vx, vy, wz):
         self.vel_cmd = np.array([vx, vy, wz], dtype=np.float32)
-        self.current_policy = "walking" if np.linalg.norm(self.vel_cmd) > 0.05 else "standing"
+        magnitude = float(np.linalg.norm(self.vel_cmd))
+        self.current_policy = "walking" if magnitude > self.switch_threshold else "standing"
+        self._update_command()
 
     def _update_command(self):
         self.command_updates += 1
+        cmd = np.zeros(13, dtype=np.float32)
+
+        # Only the walking session owns the twist slots, as in infer_policy.py.
+        if self.current_policy == "walking":
+            cmd[0:3] = self.vel_cmd
+
+        cmd[3:7] = self.head_offset
+        self.command = cmd
 
     def start_gesture(self, key):
+        cfg = self.gesture_player.trigger(key)
+
+        if cfg is None:
+            return None
+
         self.started_gestures.append(key)
-        self.gesture_player.active_name = {"n": "nod yes", "m": "shake no"}[key]
-        return object()
+        return cfg
 
     def get_projected_gravity(self):
         return np.array([0.0, 0.0, self.gravity_z], dtype=np.float32)
 
 
+def _pair(**policy_kwargs):
+    """One policy and the state bound to it."""
+    policy = FakePolicy(**policy_kwargs)
+
+    return BridgeState(policy), policy
+
+
+def _tick_seconds(runner, seconds: float, policy_enabled: bool = True) -> None:
+    """Run whole control steps worth of sim time."""
+    for _ in range(int(round(seconds / CONTROL_DT))):
+        runner.tick(policy_enabled)
+
+
+class TestBridgeState:
+    def test_walk_is_queued_and_drained_in_order(self):
+        state, _ = _pair()
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        state.submit_stop()
+        drained = state.drain()
+        assert drained == [WalkCmd(0.2, 0.0, 0.0, 2.0), StopCmd()]
+        assert state.drain() == []
+
+    def test_walk_speeds_are_clamped_to_the_policy_envelope(self):
+        state, policy = _pair()
+        echo = state.submit_walk(9.0, 0.0, 0.0, 2.0)
+        assert echo["vx"] == pytest.approx(policy.vel_max_x)
+        assert echo["clamped"] is True
+        assert state.drain() == [WalkCmd(policy.vel_max_x, 0.0, 0.0, 2.0)]
+
+    def test_walk_lateral_is_clamped_to_zero_on_the_roller_envelope(self):
+        state, policy = _pair()
+        policy.vel_max_y = 0.0
+        policy.vel_min_y = 0.0
+        echo = state.submit_walk(0.0, 0.3, 0.0, 2.0)
+        assert echo["vy"] == pytest.approx(0.0)
+        assert echo["clamped"] is True
+
+    def test_walk_backward_is_clamped_to_the_asymmetric_minimum(self):
+        state, policy = _pair()
+        policy.vel_min_x = -0.1
+        echo = state.submit_walk(-0.9, 0.0, 0.0, 2.0)
+        assert echo["vx"] == pytest.approx(-0.1)
+
+    def test_walk_without_a_walking_policy_is_rejected(self):
+        state, _ = _pair(walking=False)
+        with pytest.raises(ValueError):
+            state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == []
+
+    def test_walk_duration_default_and_max(self):
+        state, _ = _pair()
+        assert state.submit_walk(0.1, 0.0, 0.0, None)["seconds"] == WALK_DEFAULT_S
+        assert state.submit_walk(0.1, 0.0, 0.0, 60.0)["seconds"] == WALK_MAX_S
+
+    def test_look_clamps_head_angles(self):
+        state, _ = _pair()
+        echo = state.submit_look(-9.0, 0.5)
+        assert echo["pitch"] == pytest.approx(-HEAD_PITCH_MAX)
+        assert echo["yaw"] == pytest.approx(0.5)
+        assert state.drain() == [LookCmd(-HEAD_PITCH_MAX, 0.5)]
+
+    def test_look_clamps_yaw_to_its_own_max(self):
+        state, _ = _pair()
+        echo = state.submit_look(0.0, 9.0)
+        assert echo["yaw"] == pytest.approx(HEAD_YAW_MAX)
+        assert state.drain() == [LookCmd(0.0, HEAD_YAW_MAX)]
+
+    def test_look_takes_the_tighter_of_head_max_and_the_axis_cap(self):
+        state, policy = _pair()
+        policy.head_max = 0.4
+        echo = state.submit_look(9.0, 9.0)
+        assert echo["pitch"] == pytest.approx(0.4)
+        assert echo["yaw"] == pytest.approx(0.4)
+        assert echo["clamped"] is True
+
+    def test_walk_with_nan_speed_raises_and_queues_nothing(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError):
+            state.submit_walk(float("nan"), 0.0, 0.0, 1.0)
+        assert state.drain() == []
+
+    def test_unknown_gesture_is_rejected_and_not_queued(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError):
+            state.submit_gesture("backflip")
+        assert state.drain() == []
+        state.submit_gesture("nod")
+        assert state.drain() == [GestureCmd("nod")]
+
+    def test_gesture_unbound_on_the_player_is_rejected(self):
+        state, _ = _pair(gestures={})
+        with pytest.raises(ValueError):
+            state.submit_gesture("nod")
+        assert state.drain() == []
+
+    def test_status_roundtrip_returns_a_copy(self):
+        state, _ = _pair()
+        state.set_status({"policy": "walking"})
+        status = state.get_status()
+        status["policy"] = "mutated"
+        assert state.get_status() == {"policy": "walking"}
+
+    def test_status_poll_counts_as_a_brain_request(self):
+        state, _ = _pair()
+        before = state.request_count()
+        state.get_status()
+        assert state.request_count() == before + 1
+
+    def test_walk_seconds_clamping_sets_clamped_flag(self):
+        state, _ = _pair()
+        echo = state.submit_walk(0.1, 0.0, 0.0, 60.0)
+        assert echo["seconds"] == pytest.approx(WALK_MAX_S)
+        assert echo["clamped"] is True
+
+    def test_walk_seconds_none_default_not_clamped(self):
+        state, _ = _pair()
+        echo = state.submit_walk(0.1, 0.0, 0.0, None)
+        assert echo["seconds"] == pytest.approx(WALK_DEFAULT_S)
+        assert echo["clamped"] is False
+
+
 class TestSkillsTick:
-    def test_walk_applies_and_expires_to_zero(self):
-        state, policy = BridgeState(), FakePolicy()
-        runner = skills.SkillRunner(policy, state)
-        state.submit_walk(0.2, 0.0, 0.3, 2.0)
-        runner.tick(now=100.0)
+    def test_walk_applies_and_expires_in_sim_time(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.2, 0.0, 0.3, 1.0)
+        runner.tick()
         assert policy.vel_cmd.tolist() == pytest.approx([0.2, 0.0, 0.3])
 
-        runner.tick(now=101.9)  # still walking
+        _tick_seconds(runner, 0.9)
         assert policy.vel_cmd[0] == pytest.approx(0.2)
 
-        runner.tick(now=102.1)  # deadline passed
+        _tick_seconds(runner, 0.2)
         assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
 
-    def test_new_walk_extends_deadline(self):
-        state, policy = BridgeState(), FakePolicy()
-        runner = skills.SkillRunner(policy, state)
-        state.submit_walk(0.2, 0.0, 0.0, 2.0)
-        runner.tick(now=100.0)
+    def test_new_walk_extends_the_countdown(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.2, 0.0, 0.0, 1.0)
+        runner.tick()
         state.submit_walk(0.1, 0.0, 0.0, 5.0)
-        runner.tick(now=101.0)
-        runner.tick(now=103.0)  # old deadline passed, new one not
+        _tick_seconds(runner, 2.0)
         assert policy.vel_cmd[0] == pytest.approx(0.1)
 
     def test_stop_zeroes_twist_head_and_gesture(self):
-        state, policy = BridgeState(), FakePolicy()
-        runner = skills.SkillRunner(policy, state)
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
         state.submit_walk(0.2, 0.1, 0.0, 5.0)
         state.submit_look(0.3, -0.2)
         state.submit_gesture("nod")
-        runner.tick(now=100.0)
+        runner.tick()
         state.submit_stop()
-        runner.tick(now=100.1)
+        runner.tick()
         assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
         assert policy.head_offset.tolist() == [0.0, 0.0, 0.0, 0.0]
         assert policy.gesture_player.active_name is None
 
     def test_look_writes_head_pitch_and_yaw(self):
-        state, policy = BridgeState(), FakePolicy()
-        runner = skills.SkillRunner(policy, state)
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
         state.submit_look(0.3, -0.4)
-        runner.tick(now=100.0)
+        runner.tick()
         assert policy.head_offset.tolist() == pytest.approx([0.0, 0.3, -0.4, 0.0])
         assert policy.command_updates > 0
 
     def test_gesture_maps_names_to_keys(self):
-        state, policy = BridgeState(), FakePolicy()
-        runner = skills.SkillRunner(policy, state)
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
         state.submit_gesture("nod")
         state.submit_gesture("shake")
-        runner.tick(now=100.0)
+        runner.tick()
         assert policy.started_gestures == ["n", "m"]
 
     def test_status_snapshot_content(self):
-        state, policy = BridgeState(), FakePolicy()
-        runner = skills.SkillRunner(policy, state)
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
         state.submit_walk(0.2, 0.0, 0.0, 2.0)
-        runner.tick(now=100.0)
+        runner.tick()
         status = state.get_status()
         assert status["ready"] is True
         assert status["policy"] == "walking"
         assert status["twist"] == pytest.approx([0.2, 0.0, 0.0])
-        assert status["walk_seconds_left"] == pytest.approx(2.0)
+        assert status["walk_seconds_left"] == pytest.approx(2.0 - CONTROL_DT)
         assert status["gesture"] is None
         assert status["fallen"] is False
 
+    def test_status_twist_is_zero_when_the_command_block_drops_it(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.01, 0.0, 0.0, 2.0)  # under the walking switch threshold
+        runner.tick()
+        status = state.get_status()
+        assert status["policy"] == "standing"
+        assert status["twist"] == pytest.approx([0.0, 0.0, 0.0])
+
+    def test_status_reports_the_short_gesture_name(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_gesture("nod")
+        runner.tick()
+        assert state.get_status()["gesture"] == "nod"
+
+    def test_paused_tick_reports_not_ready_and_holds_the_countdown(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.2, 0.0, 0.0, 0.1)
+        runner.tick(policy_enabled=False)
+        _tick_seconds(runner, 1.0, policy_enabled=False)
+        status = state.get_status()
+        assert status["ready"] is False
+        assert status["walk_seconds_left"] == pytest.approx(0.1)
+        assert policy.vel_cmd[0] == pytest.approx(0.2)
+
+    def test_watchdog_zeroes_twist_and_head_after_silence(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_look(0.5, 0.4)
+        runner.tick()
+        assert policy.head_offset[1] == pytest.approx(0.5)
+
+        _tick_seconds(runner, BRAIN_TIMEOUT_S + 1.0)
+        assert policy.head_offset.tolist() == [0.0, 0.0, 0.0, 0.0]
+        assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
+
+    def test_watchdog_leaves_a_running_gesture_alone(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_gesture("nod")
+        runner.tick()
+        policy.head_offset[1] = 0.3  # a gesture writing its own head pose
+
+        _tick_seconds(runner, BRAIN_TIMEOUT_S + 1.0)
+        assert policy.head_offset[1] == pytest.approx(0.3)
+
+    def test_status_polls_keep_the_watchdog_quiet(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_look(0.5, 0.0)
+        runner.tick()
+
+        for _ in range(int(round((BRAIN_TIMEOUT_S + 1.0) / CONTROL_DT))):
+            runner.tick()
+            state.get_status()
+
+        assert policy.head_offset[1] == pytest.approx(0.5)
+
+    def test_watchdog_releases_once_and_lets_a_later_look_stand(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_look(0.5, 0.0)
+        runner.tick()
+        _tick_seconds(runner, BRAIN_TIMEOUT_S + 1.0)
+
+        state.submit_look(0.2, 0.0)
+        runner.tick()
+        _tick_seconds(runner, 1.0)
+        assert policy.head_offset[1] == pytest.approx(0.2)
+
     @pytest.mark.parametrize("gravity_z", [0.0, 0.9])
     def test_fallen_is_true_near_or_past_upright(self, gravity_z):
-        state, policy = BridgeState(), FakePolicy(gravity_z=gravity_z)
-        runner = skills.SkillRunner(policy, state)
-        runner.tick(now=100.0)
+        state, policy = _pair(gravity_z=gravity_z)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        runner.tick()
         assert state.get_status()["fallen"] is True
 
     def test_fallen_is_false_when_upright(self):
-        state, policy = BridgeState(), FakePolicy(gravity_z=-1.0)
-        runner = skills.SkillRunner(policy, state)
-        runner.tick(now=100.0)
+        state, policy = _pair(gravity_z=-1.0)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        runner.tick()
         assert state.get_status()["fallen"] is False
+
+    def test_fallen_zeroes_the_twist_and_cancels_the_walk(self):
+        state, policy = _pair(gravity_z=0.0)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.2, 0.0, 0.0, 5.0)
+        runner.tick()
+        assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
+        assert state.get_status()["walk_seconds_left"] == pytest.approx(0.0)
 
 
 def _post(url, body):
@@ -221,14 +402,34 @@ def _post(url, body):
         return resp.status, json.loads(resp.read())
 
 
+def _raw_request(url, raw: bytes) -> bytes:
+    """Send handwritten request bytes so bad headers reach the server verbatim."""
+    host, port = urllib.parse.urlsplit(url).netloc.split(":")
+
+    with socket.create_connection((host, int(port)), timeout=5) as sock:
+        sock.sendall(raw)
+
+        return sock.recv(4096)
+
+
+@contextlib.contextmanager
+def _served(policy):
+    """Run the bridge on a free port for the length of the block."""
+    state = BridgeState(policy)
+    server = start_bridge(state, port=0)  # port 0: OS picks a free port
+
+    try:
+        yield state, f"http://127.0.0.1:{server.server_address[1]}"
+
+    finally:
+        server.shutdown()
+
+
 class TestBridgeServer:
     @pytest.fixture()
     def served_state(self):
-        state = BridgeState()
-        server = start_bridge(state, port=0)  # port 0: OS picks a free port
-        url = f"http://127.0.0.1:{server.server_address[1]}"
-        yield state, url
-        server.shutdown()
+        with _served(FakePolicy()) as pair:
+            yield pair
 
     def test_walk_roundtrip(self, served_state):
         state, url = served_state
@@ -236,6 +437,14 @@ class TestBridgeServer:
         assert status == 200
         assert body["vx"] == pytest.approx(0.2)
         assert state.drain() == [WalkCmd(0.2, 0.0, 0.0, 2.0)]
+
+    def test_walk_without_a_walking_policy_returns_400(self):
+        with _served(FakePolicy(walking=False)) as (state, url):
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                _post(f"{url}/walk", {"vx": 0.2})
+            assert excinfo.value.code == 400
+            assert "error" in json.loads(excinfo.value.read())
+            assert state.drain() == []
 
     def test_stop_roundtrip(self, served_state):
         state, url = served_state
@@ -275,6 +484,13 @@ class TestBridgeServer:
         with pytest.raises(urllib.error.HTTPError) as excinfo:
             urllib.request.urlopen(req, timeout=5)
         assert excinfo.value.code == 400
+
+    def test_bad_content_length_returns_400(self, served_state):
+        state, url = served_state
+        raw = b"POST /walk HTTP/1.1\r\nHost: localhost\r\nContent-Length: abc\r\n\r\n"
+        response = _raw_request(url, raw)
+        assert b"400" in response.split(b"\r\n", 1)[0]
+        assert state.drain() == []
 
     def test_unknown_route_returns_404(self, served_state):
         state, url = served_state

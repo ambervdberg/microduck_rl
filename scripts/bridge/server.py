@@ -15,7 +15,7 @@ from bridge.state import BridgeState
 def start_bridge(state: BridgeState, port: int) -> ThreadingHTTPServer:
     """Serve the bridge API on 127.0.0.1:port in a daemon thread."""
 
-    # Bind to loopback only; the bridge is never reachable from the network.
+    # Bind to loopback only. The bridge is never reachable from the network.
     server = BridgeServer(state, port)
 
     # Daemon thread: the process exits with the sim, no shutdown call needed.
@@ -44,7 +44,7 @@ class HttpError(Exception):
 
 class BridgeHandler(BaseHTTPRequestHandler):
 
-    # POST path to handler method name; each method takes the body and returns the echo.
+    # POST path to handler method name. Each method takes the body and returns the echo.
     POST_ROUTES = {
         "/walk": "_walk",
         "/stop": "_stop",
@@ -80,9 +80,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _state(self) -> BridgeState:
         return self.server.state
 
-    # Reads the request body as a JSON object; empty body means empty command.
+    # Reads the request body as a JSON object. Empty body means empty command.
     def _parse_body(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
+        length = self._content_length()
         raw = self.rfile.read(length) if length else b"{}"
 
         try:
@@ -97,21 +97,39 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         return body
 
-    # Looks up the route for this path and runs it; bad values become a 400.
+    # Body length from the header. A non-numeric or negative value is a 400.
+    def _content_length(self) -> int:
+        raw = self.headers.get("Content-Length")
+
+        if not raw:
+            return 0
+
+        try:
+            length = int(raw)
+
+        except ValueError:
+            raise HttpError(400, "Content-Length is not a number")
+
+        if length < 0:
+            raise HttpError(400, "Content-Length is negative")
+
+        return length
+
+    # Looks up the route for this path and runs it. Bad values become a 400.
     def _route(self, body: dict) -> dict:
         method_name = self.POST_ROUTES.get(self.path)
 
         if method_name is None:
             raise HttpError(404, f"unknown route {self.path}")
 
-        # submit_* raise ValueError or TypeError on bad values; nothing is queued then.
+        # submit_* raise ValueError or TypeError on bad values. Nothing is queued then.
         try:
             return getattr(self, method_name)(body)
 
         except (ValueError, TypeError) as exc:
             raise HttpError(400, str(exc))
 
-    # Walk for a while; missing speeds default to zero, missing seconds to the bridge default.
+    # Walk for a while. Missing speeds default to zero, missing seconds to the bridge default.
     def _walk(self, body: dict) -> dict:
         return self._state.submit_walk(
             body.get("vx", 0.0),
@@ -128,7 +146,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _look(self, body: dict) -> dict:
         return self._state.submit_look(body.get("pitch", 0.0), body.get("yaw", 0.0))
 
-    # Play a named head gesture; an unknown name raises and becomes a 400.
+    # Play a named head gesture. An unknown name raises and becomes a 400.
     def _gesture(self, body: dict) -> dict:
         return self._state.submit_gesture(body.get("name"))
 
