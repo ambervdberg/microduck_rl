@@ -54,7 +54,7 @@ def _get(path: str) -> str:
 
 @tool
 def walk(vx: float = 0.0, vy: float = 0.0, wz: float = 0.0, seconds: float = 3.0) -> str:
-    """Walk for a few seconds, then stop automatically.
+    """Start walking. Returns right away, the robot keeps walking for `seconds` seconds.
 
     vx: forward speed in m/s (max 0.4, negative walks backward).
     vy: sideways speed in m/s (max 0.3, positive is left).
@@ -74,7 +74,7 @@ def stop() -> str:
 def look(pitch: float = 0.0, yaw: float = 0.0) -> str:
     """Point the head and hold it there. Radians.
 
-    pitch: positive looks up, max 1.1. yaw: positive looks left, max 1.4.
+    pitch: positive looks DOWN, negative looks up, max 1.1. yaw: positive looks left, max 1.4.
     """
     return _post("/look", {"pitch": pitch, "yaw": yaw})
 
