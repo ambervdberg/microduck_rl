@@ -21,11 +21,25 @@ from copy import deepcopy
 
 NUM_STEPS_PER_ENV = 24
 
+# Explicit command buckets. Uniform sampling makes these regions so rare that
+# "stand still" is a safe average answer, so they never get trained. Each
+# bucket is a disjoint slice of one draw per resample; see
+# VelocityCommandCommandOnly._resample_command.
+
 # Fraction of envs commanded to spin on the spot (lin=0, |ang| ∈ [0.4·max, max]).
 TURN_IN_PLACE_FRACTION = 0.15
 
+# Fraction of envs commanded to walk slowly straight ahead or backwards.
+LOW_SPEED_FRACTION = 0.10
+LOW_SPEED_X_RANGE = (0.12, 0.20)  # |lin_vel_x| (m/s), sign drawn per env
+# Below 0.12 m/s the reward pays standing still more than any walk.
+
+# Fraction of envs commanded to turn slowly on the spot.
+SLOW_TURN_FRACTION = 0.05
+SLOW_TURN_ANG_RANGE = (0.10, 0.40)  # |ang_vel_z| (rad/s), sign drawn per env
+
 # Symmetry
-ENABLE_SYMMETRY = False
+ENABLE_SYMMETRY = True
 
 # Domain randomization toggles
 ENABLE_COM_RANDOMIZATION = True
@@ -338,11 +352,24 @@ def make_microduck_velocity_env_cfg(
     cfg.rewards["body_ang_vel"].weight = -0.05
     cfg.rewards["angular_momentum"].weight = -0.02
 
-    # Velocity tracking rewards
+    # Linear velocity tracking: tight std on the INSTANTANEOUS velocity.
+    # std^2 = 0.04. Tighter kills small commands: the gait sways, so a tighter
+    # std charges the sway more and standing still wins. Measuring a 1 s EMA
+    # instead made the policy overshoot by 40%.
     cfg.rewards["track_linear_velocity"].weight = 2.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.1)
-    cfg.rewards["track_angular_velocity"].weight = 2.0
+    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.04)
+    # Angular tracking is split. A walking gait sways at ~1.0 rad/s in yaw, so
+    # the instantaneous term pays a frozen policy more than any walk; it stays
+    # only at low weight to discourage wild spinning. The bulk of the mass sits
+    # on a 0.5 s EMA, which cancels the sway and charges the sustained rate.
+    cfg.rewards["track_angular_velocity"].weight = 0.5
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
+
+    cfg.rewards["track_angular_velocity_ema"] = RewardTermCfg(
+        func=microduck_mdp.track_angular_velocity_ema,
+        weight=2.0,
+        params={"command_name": "twist", "std": math.sqrt(0.05), "tau_s": 0.5},
+    )
 
     # Action smoothness: stage-0 value; the action_rate_weight curriculum below
     # ramps it -0.1 → -1.0 by iter 1500.
@@ -650,8 +677,12 @@ def make_microduck_velocity_env_cfg(
     command.ranges.ang_vel_z = (-1.0, 1.0)
     command.viz.z_offset = 0.5
     cfg.commands["twist"] = microduck_mdp.VelocityCommandCommandOnlyCfg(**vars(command))
-    # Explicit turn-in-place bucket (see TURN_IN_PLACE_FRACTION above).
+    # Explicit command buckets (see the fractions at the top of this file).
     cfg.commands["twist"].rel_turn_in_place_envs = TURN_IN_PLACE_FRACTION
+    cfg.commands["twist"].rel_low_speed_envs = LOW_SPEED_FRACTION
+    cfg.commands["twist"].low_speed_x_range = LOW_SPEED_X_RANGE
+    cfg.commands["twist"].rel_slow_turn_envs = SLOW_TURN_FRACTION
+    cfg.commands["twist"].slow_turn_ang_range = SLOW_TURN_ANG_RANGE
 
     # Head pose command (4D deltas from HOME, in joint order:
     #   neck_pitch, head_pitch, head_yaw, head_roll). Tracked as a primary
