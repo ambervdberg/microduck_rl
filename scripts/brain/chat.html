@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jeeves</title>
+<style>
+  html, body { margin: 0; height: 100%; font: 15px system-ui, sans-serif; background: #111; color: #eee; }
+  body { display: flex; flex-direction: column; height: 100vh; }
+  iframe { flex: 0 0 55vh; width: 100%; border: 0; background: #000; }
+  #status { padding: 4px 10px; font-size: 12px; color: #9ad; background: #1b1b1b; white-space: nowrap; overflow: hidden; }
+  #log { flex: 1; overflow-y: auto; padding: 8px 10px; }
+  .msg { margin: 4px 0; padding: 6px 10px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; }
+  .me { background: #2a4d7a; margin-left: auto; }
+  .bot { background: #2b2b2b; }
+  form { display: flex; gap: 6px; padding: 8px 10px; background: #1b1b1b; }
+  input { flex: 1; padding: 10px; font-size: 16px; border-radius: 8px; border: 1px solid #444; background: #222; color: #eee; }
+  button { padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 0; background: #3b7ddd; color: white; }
+  button:disabled { background: #555; }
+</style>
+</head>
+<body>
+<iframe id="viewer" title="viewer"></iframe>
+<div id="status">connecting to the bridge...</div>
+<div id="log"></div>
+<form id="form">
+  <input id="text" autocomplete="off" placeholder="Tell Jeeves what to do" autofocus>
+  <button id="send">Send</button>
+</form>
+<script>
+  // Behind "tailscale serve --set-path /chat" the page sits under /chat, locally it sits at /.
+  const base = location.pathname.replace(/\/$/, "");
+  const viewerUrl = base ? "/" : location.protocol + "//" + location.hostname + ":8080/";
+  document.getElementById("viewer").src = viewerUrl;
+
+  const log = document.getElementById("log");
+  const form = document.getElementById("form");
+  const text = document.getElementById("text");
+  const send = document.getElementById("send");
+
+  function add(kind, body) {
+    const el = document.createElement("div");
+    el.className = "msg " + kind;
+    el.textContent = body;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const line = text.value.trim();
+    if (!line) return;
+    add("me", line);
+    text.value = "";
+    send.disabled = true;
+    try {
+      const res = await fetch(base + "/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: line }) });
+      const data = await res.json();
+      add("bot", data.reply ?? data.error ?? "no reply");
+    } catch (err) {
+      add("bot", "Error: " + err);
+    } finally {
+      send.disabled = false;
+      text.focus();
+    }
+  });
+
+  async function refreshStatus() {
+    try {
+      const s = await (await fetch(base + "/status")).json();
+      if (!s.ready) { document.getElementById("status").textContent = "bridge not ready" + (s.error ? ": " + s.error : ""); return; }
+      const t = s.twist.map((v) => v.toFixed(2)).join(" ");
+      const h = s.head.map((v) => v.toFixed(2)).join(" ");
+      document.getElementById("status").textContent =
+        `twist ${t} | head ${h} | ${s.walk_seconds_left.toFixed(1)}s left` + (s.gesture ? ` | ${s.gesture}` : "") + (s.fallen ? " | FALLEN" : "");
+    } catch (err) {
+      document.getElementById("status").textContent = "no status: " + err;
+    }
+  }
+  setInterval(refreshStatus, 2000);
+  refreshStatus();
+</script>
+</body>
+</html>

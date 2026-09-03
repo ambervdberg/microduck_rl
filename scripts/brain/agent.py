@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 
 from langchain.agents import create_agent
 from langchain_openai import AzureChatOpenAI
-
 from tools import ALL_TOOLS
 
 SYSTEM_PROMPT = """You control Microduck, a small bipedal robot, through tools.
@@ -45,21 +44,27 @@ def make_agent():
     return create_agent(model, ALL_TOOLS, system_prompt=SYSTEM_PROMPT)
 
 
-def _invoke_turn(agent, messages: list) -> list:
-    """Run one agent turn.
+def run_turn(agent, messages: list) -> tuple[list, str]:
+    """Run one agent turn. Returns the new history and the reply text.
 
-    On failure, print the error and drop the pending user message so
-    history stays consistent with what the model actually saw.
+    On failure the pending user message is dropped so history stays
+    consistent with what the model actually saw, and the reply is the error.
     """
     try:
         result = agent.invoke({"messages": messages})
 
-    except Exception as exc:
-        print(f"Error: {exc}")
-        return messages[:-1]
+    except Exception as exc:  # noqa: BLE001  any tool or model failure becomes the reply
+        return messages[:-1], f"Error: {exc}"
 
     messages = result["messages"]
-    print(messages[-1].text)
+
+    return messages, messages[-1].text
+
+
+def _invoke_turn(agent, messages: list) -> list:
+    """Terminal variant of run_turn: prints the reply."""
+    messages, reply = run_turn(agent, messages)
+    print(reply)
 
     return messages
 
