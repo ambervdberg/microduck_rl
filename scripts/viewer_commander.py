@@ -85,6 +85,7 @@ class ViewerCommander:
     # Command handlers.
 
     def _apply(self, cmd) -> None:
+        self._release_joystick()
         if isinstance(cmd, WalkCmd):
             self._twist = [cmd.vx, cmd.vy, cmd.wz]
             self._walk_until = self._time + cmd.seconds
@@ -108,6 +109,12 @@ class ViewerCommander:
         twist = self._env.command_manager.get_term("twist")
         if hasattr(twist, "is_standing_env"):
             twist.is_standing_env[:] = False
+
+    def _release_joystick(self) -> None:
+        """A chat command takes control back from the viser sliders (their Enable box)."""
+        joystick = getattr(self._env.command_manager.get_term("twist"), "_joystick_enabled", None)
+        if joystick is not None and joystick.value:
+            joystick.value = False
 
     def _write_tensors(self) -> None:
         manager = self._env.command_manager
@@ -143,11 +150,18 @@ class ViewerCommander:
         robot = self._env.scene["robot"]
         return float(robot.data.projected_gravity_b[0, 2]) > FALLEN_GRAVITY_Z
 
+    def _measured_twist(self) -> list[float]:
+        data = self._env.scene["robot"].data
+        lin = data.root_link_lin_vel_b[0]
+        ang = data.root_link_ang_vel_b[0]
+        return [round(float(lin[0]), 3), round(float(lin[1]), 3), round(float(ang[2]), 3)]
+
     def _publish_status(self) -> None:
         self._state.set_status({
             "ready": True,
             "policy": "walking",
             "twist": list(self._twist),
+            "measured_twist": self._measured_twist(),
             "head": list(self._head),
             "walk_seconds_left": max(0.0, self._walk_until - self._time),
             "gesture": self._gesture.name if self._gesture else None,

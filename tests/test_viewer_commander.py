@@ -39,6 +39,8 @@ class _Manager:
 class _Robot:
     class data:
         projected_gravity_b = torch.tensor([[0.0, 0.0, -1.0]])
+        root_link_lin_vel_b = torch.tensor([[0.25, 0.0, 0.0]])
+        root_link_ang_vel_b = torch.tensor([[0.0, 0.0, 0.1]])
 
 
 class _Env:
@@ -130,3 +132,16 @@ def test_status_reports_twist_head_and_upright():
     assert status["twist"] == pytest.approx([0.2, 0.0, 0.0])
     assert status["fallen"] is False
     assert status["walk_seconds_left"] > 2.9
+    assert status["measured_twist"] == pytest.approx([0.25, 0.0, 0.1])
+
+
+class _Checkbox:
+    value = True
+
+
+def test_chat_command_switches_the_viser_sliders_off():
+    env, state, commander = _setup()
+    env.command_manager.get_term("twist")._joystick_enabled = _Checkbox()
+    state.submit_walk(0.2, 0.0, 0.0, 3.0)
+    commander.tick()
+    assert env.command_manager.get_term("twist")._joystick_enabled.value is False
