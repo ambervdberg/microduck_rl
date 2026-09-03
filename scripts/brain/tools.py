@@ -5,6 +5,7 @@ Caps and safety live in the bridge, not here: these are thin clients.
 
 import json
 import os
+import time
 
 import requests
 from langchain_core.tools import tool
@@ -52,16 +53,112 @@ def _get(path: str) -> str:
     return _request("GET", path)
 
 
+IDLE_POLL_S = 0.25
+
+# How long to wait for the sim to pick the command up before watching for the end of it.
+START_WAIT_S = 1.0
+
+# Wait cap for a walk of N seconds. Sim time in the viewer runs slower than wall time.
+WALK_WAIT_FACTOR = 2.0
+WALK_WAIT_MARGIN_S = 2.0
+
+GESTURE_MAX_WAIT_S = 6.0
+
+# How long a look takes to settle, so two looks in a row are both visible.
+LOOK_SETTLE_S = 1.0
+
+
+def _is_idle(status: dict) -> bool:
+    """True when the robot has no walk or gesture running."""
+    twist = status.get("twist") or [0.0, 0.0, 0.0]
+    return all(float(v) == 0.0 for v in twist) and not status.get("gesture")
+
+
+def _is_running(status: dict) -> bool:
+    """True when the status shows a walk or a gesture under way."""
+    twist = status.get("twist") or [0.0, 0.0, 0.0]
+    walking = float(status.get("walk_seconds_left") or 0.0) > 0.0 or any(float(v) != 0.0 for v in twist)
+    return walking or bool(status.get("gesture"))
+
+
+def _poll_status() -> dict:
+    """Sleep one poll interval, then read the status. A bridge failure carries an "error" key."""
+    time.sleep(IDLE_POLL_S)
+    return json.loads(_get("/status"))
+
+
+def _wait_until_started() -> None:
+    """Wait for the status to show the command running, or give up after the start window.
+
+    A paused or slow sim has not drained the command yet, and its stale idle
+    status would otherwise end the wait immediately.
+    """
+    deadline = time.monotonic() + START_WAIT_S
+    while time.monotonic() < deadline:
+        status = _poll_status()
+        if "error" in status or _is_running(status):
+            return
+
+
+def _wait_until_idle(max_wait_s: float) -> None:
+    """Block until the bridge reports the robot idle, or the wait cap passes.
+
+    Tools return only when their action is over, so the agent's next tool
+    call starts after the previous one finished, and a sequence of commands
+    plays out in order.
+    """
+    _wait_until_started()
+
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        status = _poll_status()
+        if "error" in status or _is_idle(status):
+            return
+
+
+def _walk_max_wait(reply: dict) -> float:
+    """Wait cap for a walk, from the seconds the bridge echoed back."""
+    seconds = float(reply.get("seconds") or 0.0)
+    return WALK_WAIT_FACTOR * seconds + WALK_WAIT_MARGIN_S
+
+
+def _gesture_max_wait(_reply: dict) -> float:
+    """Wait cap for a gesture. Every gesture is about as long as the next."""
+    return GESTURE_MAX_WAIT_S
+
+
+def _post_and_wait(path: str, body: dict, max_wait) -> str:
+    """POST a command, then wait for it to finish. Errors return at once.
+
+    max_wait reads the reply, so a walk sizes its cap from the duration the
+    bridge accepted rather than the one that was asked for.
+    """
+    reply = _post(path, body)
+    echo = json.loads(reply)
+    if "error" not in echo:
+        _wait_until_idle(max_wait(echo))
+    return reply
+
+
+def _post_and_settle(path: str, body: dict) -> str:
+    """POST a command, then wait a fixed settle time. Errors return at once."""
+    reply = _post(path, body)
+    echo = json.loads(reply)
+    if "error" not in echo:
+        time.sleep(LOOK_SETTLE_S)
+    return reply
+
+
 @tool
 def walk(vx: float = 0.0, vy: float = 0.0, wz: float = 0.0, seconds: float = 3.0) -> str:
-    """Start walking. Returns right away, the robot keeps walking for `seconds` seconds.
+    """Walk, and return when the walk is over (about `seconds` seconds later).
 
     vx: forward speed in m/s (max 0.4, negative walks backward).
     vy: sideways speed in m/s (max 0.3, positive is left).
     wz: turn speed in rad/s (max 1.0, positive turns left).
     seconds: how long to walk (max 10). For longer walks, call again.
     """
-    return _post("/walk", {"vx": vx, "vy": vy, "wz": wz, "seconds": seconds})
+    return _post_and_wait("/walk", {"vx": vx, "vy": vy, "wz": wz, "seconds": seconds}, _walk_max_wait)
 
 
 @tool
@@ -72,17 +169,20 @@ def stop() -> str:
 
 @tool
 def look(pitch: float = 0.0, yaw: float = 0.0) -> str:
-    """Point the head and hold it there. Radians.
+    """Point the head and hold it there. Returns after the head has moved.
+
+    The head stays there until the next look or stop, so call look(0, 0) to
+    look straight ahead again. Radians.
 
     pitch: positive looks DOWN, negative looks up, max 1.1. yaw: positive looks left, max 1.4.
     """
-    return _post("/look", {"pitch": pitch, "yaw": yaw})
+    return _post_and_settle("/look", {"pitch": pitch, "yaw": yaw})
 
 
 @tool
 def gesture(name: str) -> str:
-    """Play a head gesture: 'nod' (yes) or 'shake' (no)."""
-    return _post("/gesture", {"name": name})
+    """Play a head gesture: 'nod' (yes) or 'shake' (no). Returns when it is done."""
+    return _post_and_wait("/gesture", {"name": name}, _gesture_max_wait)
 
 
 @tool

@@ -11,16 +11,17 @@ from urllib.parse import urlsplit
 
 from langchain.agents import create_agent
 from langchain_openai import AzureChatOpenAI
-
 from tools import ALL_TOOLS
 
 SYSTEM_PROMPT = """You control Microduck, a small bipedal robot, through tools.
 The robot balances itself. You only choose what it does.
 Speeds are capped by the bridge, so prefer moderate values (walking 0.2 m/s
-is normal). The walk tool returns as soon as the walk starts. The robot is
-then still walking and stops on its own after the given seconds, so say it
-is walking now, never that it finished. Check status if unsure what the
-robot is doing. Answer briefly after acting."""
+is normal). The walk and gesture tools return when the action is finished,
+so call them one after another for a sequence ("turn, then walk forward")
+and each step happens in order. Check status if unsure what the robot is
+doing. A look holds until the next look or stop, so "look down then up" is
+look down, then look up, then look(0, 0) if the head should end up straight.
+Answer briefly after acting."""
 
 
 def azure_endpoint(raw: str) -> str:
@@ -45,21 +46,27 @@ def make_agent():
     return create_agent(model, ALL_TOOLS, system_prompt=SYSTEM_PROMPT)
 
 
-def _invoke_turn(agent, messages: list) -> list:
-    """Run one agent turn.
+def run_turn(agent, messages: list) -> tuple[list, str]:
+    """Run one agent turn. Returns the new history and the reply text.
 
-    On failure, print the error and drop the pending user message so
-    history stays consistent with what the model actually saw.
+    On failure the pending user message is dropped so history stays
+    consistent with what the model actually saw, and the reply is the error.
     """
     try:
         result = agent.invoke({"messages": messages})
 
-    except Exception as exc:
-        print(f"Error: {exc}")
-        return messages[:-1]
+    except Exception as exc:  # noqa: BLE001  any tool or model failure becomes the reply
+        return messages[:-1], f"Error: {exc}"
 
     messages = result["messages"]
-    print(messages[-1].text)
+
+    return messages, messages[-1].text
+
+
+def _invoke_turn(agent, messages: list) -> list:
+    """Terminal variant of run_turn: prints the reply."""
+    messages, reply = run_turn(agent, messages)
+    print(reply)
 
     return messages
 

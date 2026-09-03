@@ -3,6 +3,14 @@
 The server never touches the policy: it queues commands on BridgeState
 and reads the status snapshot. The sim thread applies them through
 SkillRunner, so a dead server can never take the sim down.
+
+Routes:
+    GET  /status    the latest status snapshot
+    POST /walk      {"vx", "vy", "wz", "seconds"}
+    POST /look      {"pitch", "yaw"}
+    POST /gesture   {"name"}
+    POST /stop      zero twist, head and gesture
+    POST /reset     stop, and respawn the robot where the sim supports it
 """
 
 import json
@@ -50,6 +58,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         "/stop": "_stop",
         "/look": "_look",
         "/gesture": "_gesture",
+        "/reset": "_reset",
     }
 
     # Silence the default per-request log line so the sim console stays clean.
@@ -141,6 +150,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # Zero everything now.
     def _stop(self, _body: dict) -> dict:
         return self._state.submit_stop()
+
+    # Zero everything and put the robot back at its spawn.
+    def _reset(self, _body: dict) -> dict:
+        return self._state.submit_reset()
 
     # Hold a head pose until the next look or stop.
     def _look(self, body: dict) -> dict:
