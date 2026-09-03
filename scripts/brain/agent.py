@@ -16,10 +16,10 @@ from tools import ALL_TOOLS
 SYSTEM_PROMPT = """You control Microduck, a small bipedal robot, through tools.
 The robot balances itself. You only choose what it does.
 Speeds are capped by the bridge, so prefer moderate values (walking 0.2 m/s
-is normal). The walk tool returns as soon as the walk starts. The robot is
-then still walking and stops on its own after the given seconds, so say it
-is walking now, never that it finished. Check status if unsure what the
-robot is doing. Answer briefly after acting."""
+is normal). The walk and gesture tools return when the action is finished,
+so call them one after another for a sequence ("turn, then walk forward")
+and each step happens in order. Check status if unsure what the robot is
+doing. Answer briefly after acting."""
 
 
 def azure_endpoint(raw: str) -> str:

@@ -5,6 +5,7 @@ Caps and safety live in the bridge, not here: these are thin clients.
 
 import json
 import os
+import time
 
 import requests
 from langchain_core.tools import tool
@@ -52,16 +53,49 @@ def _get(path: str) -> str:
     return _request("GET", path)
 
 
+IDLE_POLL_S = 0.25
+IDLE_MAX_WAIT_S = 15.0
+
+
+def _is_idle(status: dict) -> bool:
+    """True when the robot has no walk or gesture running."""
+    twist = status.get("twist") or [0.0, 0.0, 0.0]
+    return all(float(v) == 0.0 for v in twist) and not status.get("gesture")
+
+
+def _wait_until_idle() -> None:
+    """Block until the bridge reports the robot idle, or the wait cap passes.
+
+    Tools return only when their action is over, so the agent's next tool
+    call starts after the previous one finished, and a sequence of commands
+    plays out in order.
+    """
+    deadline = time.monotonic() + IDLE_MAX_WAIT_S
+    while time.monotonic() < deadline:
+        time.sleep(IDLE_POLL_S)
+        status = json.loads(_get("/status"))
+        if "error" in status or _is_idle(status):
+            return
+
+
+def _post_and_wait(path: str, body: dict) -> str:
+    """POST a command, then wait for it to finish. Errors return at once."""
+    reply = _post(path, body)
+    if "error" not in json.loads(reply):
+        _wait_until_idle()
+    return reply
+
+
 @tool
 def walk(vx: float = 0.0, vy: float = 0.0, wz: float = 0.0, seconds: float = 3.0) -> str:
-    """Start walking. Returns right away, the robot keeps walking for `seconds` seconds.
+    """Walk, and return when the walk is over (about `seconds` seconds later).
 
     vx: forward speed in m/s (max 0.4, negative walks backward).
     vy: sideways speed in m/s (max 0.3, positive is left).
     wz: turn speed in rad/s (max 1.0, positive turns left).
     seconds: how long to walk (max 10). For longer walks, call again.
     """
-    return _post("/walk", {"vx": vx, "vy": vy, "wz": wz, "seconds": seconds})
+    return _post_and_wait("/walk", {"vx": vx, "vy": vy, "wz": wz, "seconds": seconds})
 
 
 @tool
@@ -81,8 +115,8 @@ def look(pitch: float = 0.0, yaw: float = 0.0) -> str:
 
 @tool
 def gesture(name: str) -> str:
-    """Play a head gesture: 'nod' (yes) or 'shake' (no)."""
-    return _post("/gesture", {"name": name})
+    """Play a head gesture: 'nod' (yes) or 'shake' (no). Returns when it is done."""
+    return _post_and_wait("/gesture", {"name": name})
 
 
 @tool
