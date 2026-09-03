@@ -64,6 +64,9 @@ WALK_WAIT_MARGIN_S = 2.0
 
 GESTURE_MAX_WAIT_S = 6.0
 
+# How long a look takes to settle, so two looks in a row are both visible.
+LOOK_SETTLE_S = 1.0
+
 
 def _is_idle(status: dict) -> bool:
     """True when the robot has no walk or gesture running."""
@@ -137,6 +140,15 @@ def _post_and_wait(path: str, body: dict, max_wait) -> str:
     return reply
 
 
+def _post_and_settle(path: str, body: dict) -> str:
+    """POST a command, then wait a fixed settle time. Errors return at once."""
+    reply = _post(path, body)
+    echo = json.loads(reply)
+    if "error" not in echo:
+        time.sleep(LOOK_SETTLE_S)
+    return reply
+
+
 @tool
 def walk(vx: float = 0.0, vy: float = 0.0, wz: float = 0.0, seconds: float = 3.0) -> str:
     """Walk, and return when the walk is over (about `seconds` seconds later).
@@ -157,11 +169,14 @@ def stop() -> str:
 
 @tool
 def look(pitch: float = 0.0, yaw: float = 0.0) -> str:
-    """Point the head and hold it there. Radians.
+    """Point the head and hold it there. Returns after the head has moved.
+
+    The head stays there until the next look or stop, so call look(0, 0) to
+    look straight ahead again. Radians.
 
     pitch: positive looks DOWN, negative looks up, max 1.1. yaw: positive looks left, max 1.4.
     """
-    return _post("/look", {"pitch": pitch, "yaw": yaw})
+    return _post_and_settle("/look", {"pitch": pitch, "yaw": yaw})
 
 
 @tool

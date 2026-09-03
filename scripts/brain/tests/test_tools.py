@@ -47,6 +47,7 @@ def stub_bridge(monkeypatch):
     monkeypatch.setenv("BRIDGE_URL", f"http://127.0.0.1:{server.server_address[1]}")
     monkeypatch.setattr(tools, "IDLE_POLL_S", 0.01)
     monkeypatch.setattr(tools, "START_WAIT_S", 0.02)
+    monkeypatch.setattr(tools, "LOOK_SETTLE_S", 0.0)
     yield received
     server.shutdown()
 
@@ -250,3 +251,19 @@ def test_gesture_gives_up_after_its_own_cap(monkeypatch):
         server.shutdown()
 
     assert len(_polls(received)) == 1 + int(tools.GESTURE_MAX_WAIT_S / tools.IDLE_POLL_S)
+
+
+def test_look_settles_on_success_and_returns_at_once_on_an_error(monkeypatch):
+    clock = _FakeClock()
+    _, server = _scripted_bridge(monkeypatch, [_idle()])
+    monkeypatch.setattr(tools, "time", clock)
+    try:
+        tools.look.invoke({"pitch": 0.2, "yaw": 0.0})
+        assert clock.now == tools.LOOK_SETTLE_S
+
+        # A rejected look has nothing to settle: the head never moved.
+        monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "head angle too big"}))
+        tools.look.invoke({"pitch": 9.0, "yaw": 0.0})
+        assert clock.now == tools.LOOK_SETTLE_S
+    finally:
+        server.shutdown()

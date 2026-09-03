@@ -19,7 +19,9 @@ Speeds are capped by the bridge, so prefer moderate values (walking 0.2 m/s
 is normal). The walk and gesture tools return when the action is finished,
 so call them one after another for a sequence ("turn, then walk forward")
 and each step happens in order. Check status if unsure what the robot is
-doing. Answer briefly after acting."""
+doing. A look holds until the next look or stop, so "look down then up" is
+look down, then look up, then look(0, 0) if the head should end up straight.
+Answer briefly after acting."""
 
 
 def azure_endpoint(raw: str) -> str:
