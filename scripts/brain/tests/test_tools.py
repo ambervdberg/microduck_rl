@@ -46,6 +46,7 @@ def stub_bridge(monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("BRIDGE_URL", f"http://127.0.0.1:{server.server_address[1]}")
     monkeypatch.setattr(tools, "IDLE_POLL_S", 0.01)
+    monkeypatch.setattr(tools, "START_WAIT_S", 0.02)
     yield received
     server.shutdown()
 
@@ -147,11 +148,31 @@ def test_walk_surfaces_bridge_error_body_on_non_2xx_status(stub_bridge_error_sta
     assert result["error"] == "speed too high"
 
 
-@pytest.fixture
-def busy_then_idle_bridge(monkeypatch):
-    """Status says walking for two polls, then idle. Records every request."""
+class _FakeClock:
+    """Stands in for tools.time: sleeping moves the clock, nothing blocks."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def _walking(seconds_left=1.0):
+    return {"ready": True, "twist": [0.3, 0.0, 0.0], "walk_seconds_left": seconds_left, "gesture": None}
+
+
+def _idle():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "walk_seconds_left": 0.0, "gesture": None}
+
+
+def _scripted_bridge(monkeypatch, statuses):
+    """Serves the given status bodies in order, the last one forever. Records every request."""
     received = []
-    polls = {"n": 0}
+    remaining = list(statuses)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -162,11 +183,10 @@ def busy_then_idle_bridge(monkeypatch):
             body = json.loads(self.rfile.read(length)) if length else {}
             received.append((self.command, self.path, body))
             if self.path == "/status":
-                polls["n"] += 1
-                twist = [0.3, 0.0, 0.0] if polls["n"] <= 2 else [0.0, 0.0, 0.0]
-                payload = json.dumps({"ready": True, "twist": twist, "gesture": None}).encode()
+                status = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+                payload = json.dumps(status).encode()
             else:
-                payload = json.dumps({"echo": body}).encode()
+                payload = json.dumps({"echo": body, "seconds": body.get("seconds")}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -179,21 +199,54 @@ def busy_then_idle_bridge(monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("BRIDGE_URL", f"http://127.0.0.1:{server.server_address[1]}")
-    monkeypatch.setattr(tools, "IDLE_POLL_S", 0.01)
-    yield received
-    server.shutdown()
+    monkeypatch.setattr(tools, "time", _FakeClock())
+    return received, server
 
 
-def test_walk_waits_until_the_bridge_reports_idle(busy_then_idle_bridge):
-    tools.walk.invoke({"vx": 0.3, "seconds": 1.0})
-    status_polls = [r for r in busy_then_idle_bridge if r[1] == "/status"]
-    assert len(status_polls) == 3
-    assert busy_then_idle_bridge[0][1] == "/walk"
+def _polls(received):
+    """Only the status polls, in the order the tool made them."""
+    return [r for r in received if r[1] == "/status"]
 
 
-def test_wait_gives_up_after_the_cap(busy_then_idle_bridge, monkeypatch):
-    monkeypatch.setattr(tools, "IDLE_MAX_WAIT_S", 0.015)
-    before = len(busy_then_idle_bridge)
-    tools.walk.invoke({"vx": 0.3, "seconds": 1.0})
-    status_polls = [r for r in busy_then_idle_bridge[before:] if r[1] == "/status"]
-    assert 1 <= len(status_polls) <= 2
+def test_walk_waits_until_the_bridge_reports_idle(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_walking(), _walking(), _idle()])
+    try:
+        tools.walk.invoke({"vx": 0.3, "seconds": 1.0})
+    finally:
+        server.shutdown()
+
+    # The walk goes out first, then one poll while it runs, then the idle one that ends the wait.
+    assert [r[1] for r in received] == ["/walk", "/status", "/status", "/status"]
+
+
+def test_walk_ignores_a_stale_idle_status_before_the_sim_picks_the_command_up(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_idle(), _walking(), _walking(), _idle()])
+    try:
+        tools.walk.invoke({"vx": 0.3, "seconds": 1.0})
+    finally:
+        server.shutdown()
+
+    # The stale idle does not end the wait: the tool keeps polling to the real idle.
+    assert len(_polls(received)) == 4
+
+
+def test_wait_gives_up_after_the_cap_derived_from_the_walk(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_walking()])
+    try:
+        tools.walk.invoke({"vx": 0.3, "seconds": 1.0})
+    finally:
+        server.shutdown()
+
+    cap = tools.WALK_WAIT_FACTOR * 1.0 + tools.WALK_WAIT_MARGIN_S
+    assert len(_polls(received)) == 1 + int(cap / tools.IDLE_POLL_S)
+
+
+def test_gesture_gives_up_after_its_own_cap(monkeypatch):
+    gesturing = {"ready": True, "twist": [0.0, 0.0, 0.0], "gesture": "nod"}
+    received, server = _scripted_bridge(monkeypatch, [gesturing])
+    try:
+        tools.gesture.invoke({"name": "nod"})
+    finally:
+        server.shutdown()
+
+    assert len(_polls(received)) == 1 + int(tools.GESTURE_MAX_WAIT_S / tools.IDLE_POLL_S)
