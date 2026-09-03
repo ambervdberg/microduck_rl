@@ -850,9 +850,6 @@ def _start_bridge(policy, port, control_dt):
 
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
-    parser.add_argument("--scene", type=str, default=None,
-                        help="Scene XML to load, overriding the default. Velocity policies train on "
-                             "scene_walk.xml; the default scene.xml has different collision geometry.")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
     parser.add_argument("--scene", type=str, default=None, help="Path to a scene XML, overriding the default pick (e.g. src/mjlab_microduck/robot/microduck/scene_allcollisions.xml)")
     parser.add_argument("--walking", type=str, default=None, help="Path to walking policy ONNX file")

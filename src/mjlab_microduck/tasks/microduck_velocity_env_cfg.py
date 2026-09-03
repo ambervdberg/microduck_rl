@@ -31,7 +31,8 @@ TURN_IN_PLACE_FRACTION = 0.15
 
 # Fraction of envs commanded to walk slowly straight ahead or backwards.
 LOW_SPEED_FRACTION = 0.10
-LOW_SPEED_X_RANGE = (0.12, 0.20)  # |lin_vel_x| (m/s), sign drawn per env. Below 0.12 the reward pays standing more than any walk.
+LOW_SPEED_X_RANGE = (0.12, 0.20)  # |lin_vel_x| (m/s), sign drawn per env
+# Below 0.12 m/s the reward pays standing still more than any walk.
 
 # Fraction of envs commanded to turn slowly on the spot.
 SLOW_TURN_FRACTION = 0.05
@@ -352,11 +353,9 @@ def make_microduck_velocity_env_cfg(
     cfg.rewards["angular_momentum"].weight = -0.02
 
     # Linear velocity tracking: tight std on the INSTANTANEOUS velocity.
-    # std^2 = 0.04. Run 12 tightened this to 0.025 and it failed: speed at cmd
-    # 0.30 did not move (0.216 vs 0.215) while the deadzone widened to 0.20 and
-    # slow turn-in-place died. Tightening amplifies the variance penalty on a
-    # swaying signal, so small commands lose. An EMA variant of this term is a
-    # separate recorded failure (40% overshoot). See runs.md sections 8 and 12.
+    # std^2 = 0.04. Tighter kills small commands: the gait sways, so a tighter
+    # std charges the sway more and standing still wins. Measuring a 1 s EMA
+    # instead made the policy overshoot by 40%.
     cfg.rewards["track_linear_velocity"].weight = 2.0
     cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.04)
     # Angular tracking is split. A walking gait sways at ~1.0 rad/s in yaw, so

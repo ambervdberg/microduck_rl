@@ -72,7 +72,7 @@ def test_alpha_matches_the_env_step_dt():
         env.scene._asset.data.root_link_ang_vel_b[:, 2] = 1.0
         out = _run(env, 1)
         alpha = 1.0 - math.exp(-dt / TAU)
-        assert abs(env._ang_vel_ema[0, 2].item() - alpha) < 1e-9
+        assert abs(env._ema_ang_vel_robot[0, 2].item() - alpha) < 1e-9
         expected = math.exp(-(alpha**2) / STD**2)
         assert abs(out[0].item() - expected) < 1e-6
 
@@ -128,8 +128,8 @@ def test_reset_clears_the_ema():
     env.episode_length_buf[0] = 1  # env 0 just reset
     _run(env, 1)
     alpha = 1.0 - math.exp(-0.02 / TAU)
-    assert abs(env._ang_vel_ema[0, 2].item() - alpha) < 1e-6
-    assert env._ang_vel_ema[1, 2].item() > 0.99
+    assert abs(env._ema_ang_vel_robot[0, 2].item() - alpha) < 1e-6
+    assert env._ema_ang_vel_robot[1, 2].item() > 0.99
 
 
 def test_velocity_cfg_wiring():
@@ -139,7 +139,7 @@ def test_velocity_cfg_wiring():
 
     cfg = make_microduck_velocity_env_cfg()
 
-    # Linear tracking untouched: run 7's setting, the only accurate one.
+    # Linear tracking untouched: the std that tracked speed best.
     lin = cfg.rewards["track_linear_velocity"]
     assert lin.weight == 2.0
     assert lin.params["std"] == math.sqrt(0.04)

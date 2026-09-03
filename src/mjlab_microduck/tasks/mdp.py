@@ -504,44 +504,24 @@ def neck_action_acceleration_l2(
     return torch.sum(torch.square(action_acc), dim=1)
 
 
-def track_linear_velocity_ema(
-    env: ManagerBasedRlEnv,
-    std: float,
-    command_name: str = "twist",
-    tau_s: float = 1.0,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+def _ema_update(
+    env: ManagerBasedRlEnv, name: str, actual: torch.Tensor, tau_s: float
 ) -> torch.Tensor:
-    """Gaussian reward on the EMA of body-frame linear velocity vs the command.
+    """Per-env EMA of ``actual`` with time constant ``tau_s``, stored on the env.
 
-    Companion to mjlab's ``track_linear_velocity``, which scores the
-    INSTANTANEOUS velocity. A stepping gait sways: at low commanded speed the
-    per-step velocity error of real walking exceeds the error of standing
-    still, so under a tight instantaneous std standing is the argmax and slow
-    walking never scores. Averaging over ``tau_s`` cancels the sway and prices
-    only the sustained (DC) shortfall, which is what "walks slower than
-    commanded" means.
-
-    Reads ``root_link_lin_vel_b`` — the same quantity the instantaneous term
-    measures. xy only; the z-velocity cost stays on the instantaneous term.
-
-    The EMA is per-env state, zeroed on episode reset so an episode never
-    inherits the previous episode's average.
+    Zeroed on episode reset so an episode never inherits the previous
+    episode's average.
     """
-    asset: Entity = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None, f"Command '{command_name}' not found."
-    actual = torch.nan_to_num(asset.data.root_link_lin_vel_b[:, :2], nan=0.0)
-
-    if not hasattr(env, "_lin_vel_ema") or env._lin_vel_ema.shape != actual.shape:
-        env._lin_vel_ema = torch.zeros_like(actual)
-    # Freshly reset envs: drop the previous episode's average.
-    env._lin_vel_ema[env.episode_length_buf <= 1] = 0.0
+    attr = f"_ema_{name}"
+    ema = getattr(env, attr, None)
+    if ema is None or ema.shape != actual.shape:
+        ema = torch.zeros_like(actual)
+    ema[env.episode_length_buf <= 1] = 0.0
 
     alpha = 1.0 - math.exp(-float(env.step_dt) / max(tau_s, 1e-6))
-    env._lin_vel_ema = (1.0 - alpha) * env._lin_vel_ema + alpha * actual
-
-    error = torch.sum(torch.square(command[:, :2] - env._lin_vel_ema), dim=1)
-    return torch.exp(-error / std**2)
+    ema = (1.0 - alpha) * ema + alpha * actual
+    setattr(env, attr, ema)
+    return ema
 
 
 def track_angular_velocity_ema(
@@ -564,24 +544,17 @@ def track_angular_velocity_ema(
     Reads ``root_link_ang_vel_b`` and forms the same error as the instantaneous
     term: z against the command, xy against zero, both on the EMA.
 
-    The EMA is per-env state, zeroed on episode reset so an episode never
-    inherits the previous episode's average.
+    The EMA is per-env state on the env, one buffer per asset, zeroed on reset.
     """
     asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
     assert command is not None, f"Command '{command_name}' not found."
     actual = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
 
-    if not hasattr(env, "_ang_vel_ema") or env._ang_vel_ema.shape != actual.shape:
-        env._ang_vel_ema = torch.zeros_like(actual)
-    # Freshly reset envs: drop the previous episode's average.
-    env._ang_vel_ema[env.episode_length_buf <= 1] = 0.0
+    ema = _ema_update(env, f"ang_vel_{asset_cfg.name}", actual, tau_s)
 
-    alpha = 1.0 - math.exp(-float(env.step_dt) / max(tau_s, 1e-6))
-    env._ang_vel_ema = (1.0 - alpha) * env._ang_vel_ema + alpha * actual
-
-    z_error = torch.square(command[:, 2] - env._ang_vel_ema[:, 2])
-    xy_error = torch.sum(torch.square(env._ang_vel_ema[:, :2]), dim=1)
+    z_error = torch.square(command[:, 2] - ema[:, 2])
+    xy_error = torch.sum(torch.square(ema[:, :2]), dim=1)
     return torch.exp(-(z_error + xy_error) / std**2)
 
 
