@@ -25,8 +25,10 @@ from bridge.state import (  # noqa: E402
     BridgeState,
     GestureCmd,
     LookCmd,
+    ResetCmd,
     StopCmd,
     WalkCmd,
+    available_actions,
 )
 
 from bridge import skills  # noqa: E402
@@ -233,6 +235,46 @@ class TestBridgeState:
         assert echo["seconds"] == pytest.approx(WALK_DEFAULT_S)
         assert echo["clamped"] is False
 
+    def test_reset_is_queued_and_counts_as_a_brain_request(self):
+        state, _ = _pair()
+        before = state.request_count()
+        assert state.submit_reset() == {"reset": True}
+        assert state.drain() == [ResetCmd()]
+        assert state.request_count() == before + 1
+
+
+class TestAvailableActions:
+    def test_walking_policy_offers_walk_look_and_both_gestures(self):
+        actions = available_actions(FakePolicy())
+        assert actions["walk"] is True
+        assert actions["look"] is True
+        assert actions["nod"] is True
+        assert actions["shake"] is True
+
+    def test_untrained_sessions_are_unavailable(self):
+        actions = available_actions(FakePolicy())
+        assert actions["sit"] is False
+        assert actions["stand up"] is False
+        assert actions["kick"] is False
+        assert actions["roulade"] is False
+        assert actions["pick up"] is False
+
+    def test_walk_is_unavailable_without_a_walking_policy(self):
+        assert available_actions(FakePolicy(walking=False))["walk"] is False
+
+    def test_gestures_follow_the_keys_the_player_carries(self):
+        policy = FakePolicy(gestures={})
+        actions = available_actions(policy)
+        assert actions["nod"] is False
+        assert actions["shake"] is False
+
+    def test_a_loaded_session_makes_its_action_available(self):
+        policy = FakePolicy()
+        policy.sit_session = object()
+        actions = available_actions(policy)
+        assert actions["sit"] is True
+        assert actions["stand up"] is True
+
 
 class TestSkillsTick:
     def test_walk_applies_and_expires_in_sim_time(self):
@@ -270,6 +312,19 @@ class TestSkillsTick:
         assert policy.head_offset.tolist() == [0.0, 0.0, 0.0, 0.0]
         assert policy.gesture_player.active_name is None
 
+    def test_reset_zeroes_twist_head_and_gesture_like_stop(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.2, 0.1, 0.0, 5.0)
+        state.submit_look(0.3, -0.2)
+        state.submit_gesture("nod")
+        runner.tick()
+        state.submit_reset()
+        runner.tick()
+        assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
+        assert policy.head_offset.tolist() == [0.0, 0.0, 0.0, 0.0]
+        assert policy.gesture_player.active_name is None
+
     def test_look_writes_head_pitch_and_yaw(self):
         state, policy = _pair()
         runner = skills.SkillRunner(policy, state, CONTROL_DT)
@@ -298,6 +353,14 @@ class TestSkillsTick:
         assert status["walk_seconds_left"] == pytest.approx(2.0 - CONTROL_DT)
         assert status["gesture"] is None
         assert status["fallen"] is False
+
+    def test_status_lists_the_actions_this_policy_can_run(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        runner.tick()
+        actions = state.get_status()["actions"]
+        assert actions["walk"] is True
+        assert actions["roulade"] is False
 
     def test_status_twist_is_zero_when_the_command_block_drops_it(self):
         state, policy = _pair()
@@ -452,6 +515,13 @@ class TestBridgeServer:
         assert status == 200
         assert body == {"stopped": True}
         assert state.drain() == [StopCmd()]
+
+    def test_reset_roundtrip(self, served_state):
+        state, url = served_state
+        status, body = _post(f"{url}/reset", {})
+        assert status == 200
+        assert body == {"reset": True}
+        assert state.drain() == [ResetCmd()]
 
     def test_look_roundtrip(self, served_state):
         state, url = served_state

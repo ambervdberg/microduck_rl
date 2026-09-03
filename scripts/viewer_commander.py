@@ -1,6 +1,6 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
-The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / StopCmd on a
+The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / StopCmd / ResetCmd on a
 BridgeState. In infer_policy.py a SkillRunner applies them to PolicyInference.
 Here ViewerCommander applies them to the env's command terms instead, once per
 policy step, and publishes the status the bridge serves on /status.
@@ -15,8 +15,10 @@ from bridge.state import (
     BridgeState,
     GestureCmd,
     LookCmd,
+    ResetCmd,
     StopCmd,
     WalkCmd,
+    available_actions,
 )
 
 # Head command layout: [neck_pitch, head_pitch, head_yaw, head_roll].
@@ -67,6 +69,7 @@ class ViewerCommander:
         self._head = [0.0, 0.0, 0.0, 0.0]
         self._walk_until = 0.0
         self._gesture: _Gesture | None = None
+        self._actions = available_actions(state.policy())
         self._pin_command_terms()
 
     def tick(self) -> None:
@@ -95,9 +98,17 @@ class ViewerCommander:
         elif isinstance(cmd, GestureCmd):
             self._gesture = _Gesture(cmd.name, self._time)
         elif isinstance(cmd, StopCmd):
-            self._twist = [0.0, 0.0, 0.0]
-            self._head = [0.0, 0.0, 0.0, 0.0]
-            self._gesture = None
+            self._clear_commands()
+        elif isinstance(cmd, ResetCmd):
+            self._clear_commands()
+            self._env.reset()
+
+    def _clear_commands(self) -> None:
+        """Zero the twist, the head, the gesture and the walk countdown."""
+        self._twist = [0.0, 0.0, 0.0]
+        self._head = [0.0, 0.0, 0.0, 0.0]
+        self._gesture = None
+        self._walk_until = 0.0
 
     # Tensors.
 
@@ -166,4 +177,5 @@ class ViewerCommander:
             "walk_seconds_left": max(0.0, self._walk_until - self._time),
             "gesture": self._gesture.name if self._gesture else None,
             "fallen": self._is_fallen(),
+            "actions": dict(self._actions),
         })

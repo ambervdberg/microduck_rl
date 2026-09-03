@@ -12,8 +12,10 @@ from bridge.state import (
     BridgeState,
     GestureCmd,
     LookCmd,
+    ResetCmd,
     StopCmd,
     WalkCmd,
+    available_actions,
 )
 
 FALLEN_GRAVITY_Z = -0.5  # projected gravity z is near -1 upright, near 0 on the ground
@@ -30,11 +32,14 @@ class SkillRunner:
         self._quiet_seconds = 0.0
         self._last_request_count = state.request_count()
         self._released = False
+        self._actions = available_actions(policy)
 
         # Command class to the bound handler that applies it.
+        # Reset lands on _stop: PolicyInference has no sim to respawn.
         self._handlers = {
             WalkCmd: self._walk,
             StopCmd: self._stop,
+            ResetCmd: self._stop,
             LookCmd: self._look,
             GestureCmd: self._gesture,
         }
@@ -65,7 +70,7 @@ class SkillRunner:
         self._policy.set_vel_cmd(cmd.vx, cmd.vy, cmd.wz)
         self._walk_seconds_left = cmd.seconds
 
-    def _stop(self, _cmd: StopCmd) -> None:
+    def _stop(self, _cmd) -> None:
         """Cancel any walk and gesture, and zero the head and velocity."""
         self._policy.gesture_player.cancel()
         self._policy.head_offset[:] = 0.0
@@ -144,6 +149,7 @@ class SkillRunner:
             "walk_seconds_left": self._walk_seconds_left,
             "gesture": self._active_gesture(),
             "fallen": fallen,
+            "actions": dict(self._actions),
         })
 
     def _active_gesture(self) -> str | None:

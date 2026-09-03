@@ -1,10 +1,10 @@
 """Viser viewer plus the bridge API, so a brain can drive the robot you watch in the browser.
 
-    uv run scripts/viewer_bridge.py --policy walk_lowspeed-range.onnx [--bridge-port 8630]
+    uv run scripts/viewer_bridge.py --policy walk_lowspeed-range.onnx [--bridge-port 8630] [--viewer-port 8632]
 
-Then open http://localhost:8080 for the viewer. The bridge listens on 127.0.0.1:<bridge-port>
-with the same routes infer_policy.py --bridge serves (/walk, /look, /gesture, /stop, /status),
-so scripts/brain works unchanged.
+Then open http://localhost:8632 for the viewer. The bridge listens on 127.0.0.1:<bridge-port>
+with the same routes infer_policy.py --bridge serves (/walk, /look, /gesture, /stop, /reset,
+/status), so scripts/brain works unchanged.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import sys
 import numpy as np
 import onnxruntime as ort
 import torch
+import viser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -35,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", required=True, help="ONNX walking policy")
     parser.add_argument("--bridge-port", type=int, default=8630)
+    parser.add_argument("--viewer-port", type=int, default=8632)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
 
@@ -78,7 +80,10 @@ def main() -> None:
     print(f"[bridge] listening on 127.0.0.1:{args.bridge_port}")
 
     policy = OnnxPolicy(args.policy, args.device, commander)
-    ViserPlayViewer(env, policy).run()
+    viser_server = viser.ViserServer(port=args.viewer_port)
+    print(f"[viewer] http://localhost:{args.viewer_port}")
+
+    ViserPlayViewer(env, policy, viser_server=viser_server).run()
     env.close()
 
 

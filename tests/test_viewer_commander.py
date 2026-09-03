@@ -47,6 +47,10 @@ class _Env:
     def __init__(self):
         self.command_manager = _Manager()
         self.scene = {"robot": _Robot()}
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
 
 
 def _setup():
@@ -108,6 +112,28 @@ def test_stop_zeroes_everything():
     assert _head(env) == [0.0, 0.0, 0.0, 0.0]
 
 
+def test_reset_zeroes_everything_and_respawns_the_robot():
+    env, state, commander = _setup()
+    state.submit_walk(0.3, 0.0, 0.0, 5.0)
+    state.submit_look(0.4, 0.2)
+    commander.tick()
+    state.submit_reset()
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+    assert env.resets == 1
+    assert state.get_status()["walk_seconds_left"] == 0.0
+
+
+def test_status_lists_the_actions_the_viewer_policy_can_run():
+    _env, state, commander = _setup()
+    commander.tick()
+    actions = state.get_status()["actions"]
+    assert actions["walk"] is True
+    assert actions["nod"] is True
+    assert actions["roulade"] is False
+
+
 def test_nod_moves_pitch_then_returns():
     env, state, commander = _setup()
     state.submit_gesture("nod")
@@ -143,5 +169,13 @@ def test_chat_command_switches_the_viser_sliders_off():
     env, state, commander = _setup()
     env.command_manager.get_term("twist")._joystick_enabled = _Checkbox()
     state.submit_walk(0.2, 0.0, 0.0, 3.0)
+    commander.tick()
+    assert env.command_manager.get_term("twist")._joystick_enabled.value is False
+
+
+def test_reset_takes_control_back_from_the_viser_sliders():
+    env, state, commander = _setup()
+    env.command_manager.get_term("twist")._joystick_enabled = _Checkbox()
+    state.submit_reset()
     commander.tick()
     assert env.command_manager.get_term("twist")._joystick_enabled.value is False

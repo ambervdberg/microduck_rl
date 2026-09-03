@@ -58,6 +58,49 @@ class StopCmd:
 
 
 @dataclass(frozen=True)
+class ResetCmd:
+    pass
+
+
+# What the robot could do, and what the loaded policy needs for it.
+# None is always available, "gesture:<name>" needs the key bound, anything else is a session attribute.
+ACTIONS = (
+    ("walk", "walking_session"),
+    ("look", None),
+    ("nod", "gesture:nod"),
+    ("shake", "gesture:shake"),
+    ("sit", "sit_session"),
+    ("stand up", "sit_session"),
+    ("pick up", "ground_pick_session"),
+    ("kick", "kick_session"),
+    ("roulade", "roulade_session"),
+)
+
+
+def available_actions(policy) -> dict[str, bool]:
+    """Which catalog actions the loaded policy can run."""
+    return {name: _action_available(policy, needs) for name, needs in ACTIONS}
+
+
+def _action_available(policy, needs: str | None) -> bool:
+    """One catalog entry: nothing needed, a bound gesture, or a loaded session."""
+    if needs is None:
+        return True
+
+    if needs.startswith("gesture:"):
+        return _gesture_bound(policy, needs.split(":", 1)[1])
+
+    return bool(getattr(policy, needs, None))
+
+
+def _gesture_bound(policy, name: str) -> bool:
+    """True when the gesture player carries the key this gesture plays on."""
+    key = GESTURE_KEYS.get(name)
+
+    return key is not None and key in policy.gesture_player.keys()
+
+
+@dataclass(frozen=True)
 class Envelope:
     """Speed and head limits the bridge clamps against."""
 
@@ -172,6 +215,17 @@ class BridgeState:
         self._enqueue(StopCmd())
 
         return {"stopped": True}
+
+    def submit_reset(self) -> dict:
+        """Queue a stop plus, where the sim supports it, a respawn."""
+        self._note_request()
+        self._enqueue(ResetCmd())
+
+        return {"reset": True}
+
+    def policy(self):
+        """The policy or limits object the bridge clamps against. Set once at construction."""
+        return self._policy
 
     def drain(self) -> list:
         """Return and clear all pending commands, oldest first."""
