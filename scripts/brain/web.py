@@ -56,9 +56,12 @@ class ChatBrain:
 
 
 def bridge_status() -> dict:
-    """The bridge's /status, or a not-ready stub when the sim is down."""
+    """The bridge's /status, or a not-ready stub when the sim is down.
+
+    Peeks, so the page's poll does not keep the brain watchdog fed forever.
+    """
     try:
-        return requests.get(_bridge_url() + "/status", timeout=2).json()
+        return requests.get(_bridge_url() + "/status?peek=1", timeout=2).json()
     except requests.RequestException as exc:
         return {"ready": False, "error": str(exc)}
 

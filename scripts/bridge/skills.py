@@ -6,7 +6,6 @@ indices: head_offset[1] is head_pitch, head_offset[2] is head_yaw.
 """
 
 from bridge.state import (
-    BRAIN_TIMEOUT_S,
     GESTURE_KEYS,
     GESTURE_SHORT_NAMES,
     BridgeState,
@@ -17,6 +16,7 @@ from bridge.state import (
     WalkCmd,
     available_actions,
 )
+from bridge.watchdog import BrainWatchdog
 
 FALLEN_GRAVITY_Z = -0.5  # projected gravity z is near -1 upright, near 0 on the ground
 
@@ -29,9 +29,7 @@ class SkillRunner:
         self._state = state
         self._control_dt = float(control_dt)
         self._walk_seconds_left = 0.0
-        self._quiet_seconds = 0.0
-        self._last_request_count = state.request_count()
-        self._released = False
+        self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(policy)
 
         # Command class to the bound handler that applies it.
@@ -56,7 +54,9 @@ class SkillRunner:
 
         if policy_enabled:
             self._expire_walk()
-            self._watch_brain()
+
+            if self._watchdog.tick():
+                self._release()
 
         self._publish_status(policy_enabled, fallen)
 
@@ -104,24 +104,6 @@ class SkillRunner:
 
         if self._walk_seconds_left <= 0.0:
             self._stop_walking()
-
-    def _watch_brain(self) -> None:
-        """Release twist and head once when no brain request has arrived in a while."""
-        count = self._state.request_count()
-
-        if count != self._last_request_count:
-            self._last_request_count = count
-            self._quiet_seconds = 0.0
-            self._released = False
-            return
-
-        self._quiet_seconds += self._control_dt
-
-        if self._released or self._quiet_seconds < BRAIN_TIMEOUT_S:
-            return
-
-        self._released = True
-        self._release()
 
     def _release(self) -> None:
         """Zero the twist and, unless a gesture is playing, the head pose."""

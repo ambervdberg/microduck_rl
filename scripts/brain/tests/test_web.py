@@ -140,3 +140,21 @@ def test_clear_reports_a_dead_bridge_without_failing(monkeypatch):
         assert "bridge down" in data["bridge_error"]
     finally:
         server.shutdown()
+
+
+def test_status_peeks_so_the_page_poll_does_not_feed_the_watchdog(monkeypatch):
+    asked = []
+
+    class _Reply:
+        def json(self):
+            return {"ready": True}
+
+    monkeypatch.setattr(web.requests, "get", lambda url, **kwargs: asked.append(url) or _Reply())
+
+    server, url = _start(_EchoAgent())
+    try:
+        with urllib.request.urlopen(url + "/status") as resp:
+            assert json.loads(resp.read()) == {"ready": True}
+        assert asked == [web._bridge_url() + "/status?peek=1"]
+    finally:
+        server.shutdown()

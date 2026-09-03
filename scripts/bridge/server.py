@@ -5,7 +5,8 @@ and reads the status snapshot. The sim thread applies them through
 SkillRunner, so a dead server can never take the sim down.
 
 Routes:
-    GET  /status    the latest status snapshot
+    GET  /status    the latest status snapshot, and a sign the brain is alive
+    GET  /status?peek=1   the same snapshot, without counting as a brain request
     POST /walk      {"vx", "vy", "wz", "seconds"}
     POST /look      {"pitch", "yaw"}
     POST /gesture   {"name"}
@@ -16,6 +17,7 @@ Routes:
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from bridge.state import BridgeState
 
@@ -50,6 +52,11 @@ class HttpError(Exception):
         self.message = message
 
 
+def _peek_wanted(query: str) -> bool:
+    """True for ?peek=1. Any other value, and a missing flag, count as a brain request."""
+    return parse_qs(query).get("peek", [""])[0] == "1"
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
 
     # POST path to handler method name. Each method takes the body and returns the echo.
@@ -67,11 +74,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     # GET has one route: the latest status snapshot.
     def do_GET(self):
-        if self.path != "/status":
+        url = urlsplit(self.path)
+
+        if url.path != "/status":
             self._reply_error(HttpError(404, f"unknown route {self.path}"))
             return
 
-        self._reply(200, self._state.get_status())
+        self._reply(200, self._status(url.query))
 
     # POST carries a command: parse the body, route it, answer with the echo.
     def do_POST(self):
@@ -88,6 +97,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
     @property
     def _state(self) -> BridgeState:
         return self.server.state
+
+    # A peek reads the snapshot only. Anything else marks the brain as alive.
+    def _status(self, query: str) -> dict:
+        if _peek_wanted(query):
+            return self._state.peek_status()
+
+        return self._state.get_status()
 
     # Reads the request body as a JSON object. Empty body means empty command.
     def _parse_body(self) -> dict:

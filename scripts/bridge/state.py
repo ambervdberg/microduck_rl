@@ -247,6 +247,11 @@ class BridgeState:
 
             return dict(self._status)
 
+    def peek_status(self) -> dict:
+        """Return a copy of the latest published status without feeding the watchdog."""
+        with self._lock:
+            return dict(self._status)
+
     def request_count(self) -> int:
         """Number of brain requests served so far, status polls included."""
         with self._lock:
