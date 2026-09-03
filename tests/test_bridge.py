@@ -33,6 +33,7 @@ from bridge.state import (  # noqa: E402
 
 from bridge import skills  # noqa: E402
 from bridge.server import start_bridge  # noqa: E402
+from bridge.watchdog import BrainWatchdog  # noqa: E402
 
 CONTROL_DT = 0.02  # 50 Hz, the rate infer_policy.py calls tick() at
 
@@ -274,6 +275,36 @@ class TestAvailableActions:
         actions = available_actions(policy)
         assert actions["sit"] is True
         assert actions["stand up"] is True
+
+
+class TestBrainWatchdog:
+    def test_fires_once_after_the_timeout_of_silence(self):
+        state = BridgeState(FakePolicy())
+        watchdog = BrainWatchdog(state, CONTROL_DT)
+        ticks = int(round((BRAIN_TIMEOUT_S + 1.0) / CONTROL_DT))
+        assert sum(watchdog.tick() for _ in range(ticks)) == 1
+
+    def test_stays_quiet_while_requests_keep_arriving(self):
+        state = BridgeState(FakePolicy())
+        watchdog = BrainWatchdog(state, CONTROL_DT)
+
+        for _ in range(int(round((BRAIN_TIMEOUT_S + 1.0) / CONTROL_DT))):
+            state.get_status()
+            assert watchdog.tick() is False
+
+    def test_rearms_after_the_brain_speaks_again(self):
+        state = BridgeState(FakePolicy())
+        watchdog = BrainWatchdog(state, CONTROL_DT)
+        ticks = int(round((BRAIN_TIMEOUT_S + 1.0) / CONTROL_DT))
+
+        assert sum(watchdog.tick() for _ in range(ticks)) == 1
+        state.get_status()
+        assert sum(watchdog.tick() for _ in range(ticks)) == 1
+
+    def test_timeout_is_configurable(self):
+        state = BridgeState(FakePolicy())
+        watchdog = BrainWatchdog(state, CONTROL_DT, timeout_s=0.1)
+        assert sum(watchdog.tick() for _ in range(int(round(0.1 / CONTROL_DT)))) == 1
 
 
 class TestSkillsTick:
@@ -536,6 +567,25 @@ class TestBridgeServer:
         with urllib.request.urlopen(f"{url}/status", timeout=5) as resp:
             assert resp.status == 200
             assert json.loads(resp.read()) == {"policy": "standing", "fallen": False}
+
+    def test_status_counts_as_a_brain_request_and_a_peek_does_not(self, served_state):
+        state, url = served_state
+        state.set_status({"policy": "walking"})
+
+        with urllib.request.urlopen(f"{url}/status?peek=1", timeout=5) as resp:
+            assert json.loads(resp.read()) == {"policy": "walking"}
+
+        before = state.request_count()
+
+        with urllib.request.urlopen(f"{url}/status?peek=1", timeout=5):
+            pass
+
+        assert state.request_count() == before
+
+        with urllib.request.urlopen(f"{url}/status", timeout=5):
+            pass
+
+        assert state.request_count() == before + 1
 
     def test_unknown_gesture_returns_400(self, served_state):
         state, url = served_state

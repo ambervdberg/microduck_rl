@@ -20,6 +20,7 @@ from bridge.state import (
     WalkCmd,
     available_actions,
 )
+from bridge.watchdog import BrainWatchdog
 
 # Head command layout: [neck_pitch, head_pitch, head_yaw, head_roll].
 HEAD_PITCH = 1
@@ -69,6 +70,7 @@ class ViewerCommander:
         self._head = [0.0, 0.0, 0.0, 0.0]
         self._walk_until = 0.0
         self._gesture: _Gesture | None = None
+        self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
 
@@ -81,6 +83,9 @@ class ViewerCommander:
 
         if self._time >= self._walk_until:
             self._twist = [0.0, 0.0, 0.0]
+
+        if self._watchdog.tick():
+            self._release()
 
         self._write_tensors()
         self._publish_status()
@@ -102,6 +107,14 @@ class ViewerCommander:
         elif isinstance(cmd, ResetCmd):
             self._clear_commands()
             self._env.reset()
+
+    def _release(self) -> None:
+        """The brain went quiet: zero the twist and, unless a gesture is playing, the head."""
+        self._twist = [0.0, 0.0, 0.0]
+        self._walk_until = 0.0
+
+        if self._gesture is None:
+            self._head = [0.0, 0.0, 0.0, 0.0]
 
     def _clear_commands(self) -> None:
         """Zero the twist, the head, the gesture and the walk countdown."""
