@@ -31,7 +31,7 @@ TURN_IN_PLACE_FRACTION = 0.15
 
 # Fraction of envs commanded to walk slowly straight ahead or backwards.
 LOW_SPEED_FRACTION = 0.10
-LOW_SPEED_X_RANGE = (0.05, 0.18)  # |lin_vel_x| (m/s), sign drawn per env
+LOW_SPEED_X_RANGE = (0.12, 0.20)  # |lin_vel_x| (m/s), sign drawn per env. Below 0.12 the reward pays standing more than any walk.
 
 # Fraction of envs commanded to turn slowly on the spot.
 SLOW_TURN_FRACTION = 0.05
