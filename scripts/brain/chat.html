@@ -36,8 +36,6 @@
 <script>
   // Behind "tailscale serve --set-path /chat" the page sits under /chat, locally it sits at /.
   const base = location.pathname.replace(/\/$/, "");
-  const camera = "initialCameraPosition=1.109,-0.413,0.356&initialCameraLookAt=0.000,0.000,0.000" +
-    "&initialCameraUp=0.000,0.000,1.000&initialCameraFov=1.0472&initialCameraNear=0.01&initialCameraFar=1000";
 
   // Behind the prefix the viewer is proxied on /, locally it runs on the port /config names.
   async function showViewer() {
@@ -46,7 +44,7 @@
       const cfg = await (await fetch(base + "/config")).json();
       url = location.protocol + "//" + location.hostname + ":" + cfg.viewer_port + "/";
     }
-    document.getElementById("viewer").src = url + "?" + camera;
+    document.getElementById("viewer").src = url;
   }
   showViewer();
 

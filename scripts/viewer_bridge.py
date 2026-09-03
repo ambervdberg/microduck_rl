@@ -48,6 +48,13 @@ def build_env(device: str) -> RslRlVecEnvWrapper:
     cfg.events.pop("push_robot", None)
     for term in cfg.observations["actor"].terms.values():
         term.noise = None
+
+    # Front three-quarter view at robot height.
+    cfg.viewer.distance = 1.24
+    cfg.viewer.azimuth = 160.0
+    cfg.viewer.elevation = 17.0
+    cfg.viewer.lookat = (0.0, 0.0, 0.0)
+
     env = ManagerBasedRlEnv(cfg=cfg, device=device)
     return RslRlVecEnvWrapper(env, clip_actions=load_rl_cfg(TASK).clip_actions)
 
