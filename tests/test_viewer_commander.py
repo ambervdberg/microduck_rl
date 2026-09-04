@@ -12,6 +12,7 @@ from bridge.state import BRAIN_TIMEOUT_S, BridgeState
 from bridge.watchdog import BrainWatchdog
 from viewer_commander import (
     GESTURE_SECONDS,
+    RISE_SECONDS,
     ViewerCommander,
     ViewerLimits,
 )
@@ -54,10 +55,18 @@ class _Env:
         self.resets += 1
 
 
-def _setup():
+def _setup(sit_session: bool = False):
     env = _Env()
-    state = BridgeState(ViewerLimits())
+    state = BridgeState(ViewerLimits(sit_session=sit_session))
     commander = ViewerCommander(env, state, DT)
+    return env, state, commander
+
+
+def _sitting_setup():
+    """A commander with a sitstand policy loaded, already seated."""
+    env, state, commander = _setup(sit_session=True)
+    state.submit_posture(True)
+    commander.tick()
     return env, state, commander
 
 
@@ -226,3 +235,85 @@ def test_watchdog_leaves_a_running_gesture_alone():
     _tick_silently(commander, 0.3)
     assert state.get_status()["gesture"] == "nod"
     assert _head(env)[1] != 0.0
+
+
+def test_sit_and_stand_are_offered_only_with_a_sitstand_policy():
+    _env, state, commander = _setup()
+    commander.tick()
+    assert state.get_status()["actions"]["sit"] is False
+
+    _env, state, commander = _setup(sit_session=True)
+    commander.tick()
+    actions = state.get_status()["actions"]
+    assert actions["sit"] is True
+    assert actions["stand up"] is True
+
+
+def test_sitting_writes_the_posture_flag_in_the_twist_slot():
+    env, state, commander = _sitting_setup()
+    assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
+    status = state.get_status()
+    assert status["sitting"] is True
+    assert status["posture"] == "sitting"
+    assert status["policy"] == "sit"
+
+
+def test_sitting_cancels_a_running_walk():
+    env, state, commander = _setup(sit_session=True)
+    state.submit_walk(0.3, 0.0, 0.0, 5.0)
+    commander.tick()
+    state.submit_posture(True)
+    commander.tick()
+    assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
+    assert state.get_status()["walk_seconds_left"] == 0.0
+
+
+def test_rising_writes_a_zero_flag_then_returns_to_walking():
+    env, state, commander = _sitting_setup()
+    state.submit_posture(False)
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert state.get_status()["posture"] == "rising"
+    assert commander.active_policy() == "sit"
+
+    for _ in range(int(RISE_SECONDS / DT) + 2):
+        commander.tick()
+    assert state.get_status()["posture"] == "standing"
+    assert commander.active_policy() == "walking"
+
+
+def test_walk_is_refused_while_seated_and_allowed_after_the_rise():
+    _env, state, commander = _sitting_setup()
+    with pytest.raises(ValueError, match="stand up first"):
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+
+    state.submit_posture(False)
+    for _ in range(int(RISE_SECONDS / DT) + 2):
+        commander.tick()
+    state.submit_walk(0.2, 0.0, 0.0, 2.0)
+
+
+def test_looking_still_works_while_seated():
+    env, state, commander = _sitting_setup()
+    state.submit_look(0.4, -0.6)
+    commander.tick()
+    assert _head(env) == pytest.approx([0.0, 0.4, -0.6, 0.0])
+    assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
+
+
+def test_reset_stands_the_robot_back_up():
+    env, state, commander = _sitting_setup()
+    state.submit_reset()
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert state.get_status()["posture"] == "standing"
+    assert env.resets == 1
+
+
+def test_watchdog_release_leaves_the_robot_seated():
+    env, state, commander = _sitting_setup()
+    _impatient(commander, state)
+
+    _tick_silently(commander, SHORT_TIMEOUT_S + 0.1)
+    assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
+    assert state.get_status()["posture"] == "sitting"
