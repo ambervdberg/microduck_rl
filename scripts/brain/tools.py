@@ -64,6 +64,9 @@ WALK_WAIT_MARGIN_S = 2.0
 
 GESTURE_MAX_WAIT_S = 6.0
 
+# Wait cap for a sit or a stand up. Sim time in the viewer runs slower than wall time.
+POSTURE_MAX_WAIT_S = 8.0
+
 # How long a look takes to settle, so two looks in a row are both visible.
 LOOK_SETTLE_S = 1.0
 
@@ -116,6 +119,17 @@ def _wait_until_idle(max_wait_s: float) -> None:
             return
 
 
+def _wait_for_posture(target: str) -> None:
+    """Block until the bridge reports the target posture, or the wait cap passes."""
+    deadline = time.monotonic() + POSTURE_MAX_WAIT_S
+
+    while time.monotonic() < deadline:
+        status = _poll_status()
+
+        if "error" in status or status.get("posture") == target:
+            return
+
+
 def _walk_max_wait(reply: dict) -> float:
     """Wait cap for a walk, from the seconds the bridge echoed back."""
     seconds = float(reply.get("seconds") or 0.0)
@@ -137,6 +151,17 @@ def _post_and_wait(path: str, body: dict, max_wait) -> str:
     echo = json.loads(reply)
     if "error" not in echo:
         _wait_until_idle(max_wait(echo))
+    return reply
+
+
+def _post_posture(path: str, target: str) -> str:
+    """POST a posture change, then wait for the robot to get there. Errors return at once."""
+    reply = _post(path, {})
+    echo = json.loads(reply)
+
+    if "error" not in echo:
+        _wait_for_posture(target)
+
     return reply
 
 
@@ -186,9 +211,24 @@ def gesture(name: str) -> str:
 
 
 @tool
+def sit() -> str:
+    """Sit down on the floor. Returns once the robot is sitting.
+
+    The robot cannot walk while sitting. Call stand_up first.
+    """
+    return _post_posture("/sit", "sitting")
+
+
+@tool
+def stand_up() -> str:
+    """Stand back up out of a sit. Returns once the robot is standing."""
+    return _post_posture("/stand", "standing")
+
+
+@tool
 def status() -> str:
     """Current robot state: active policy, speeds, head pose, fallen or not."""
     return _get("/status")
 
 
-ALL_TOOLS = [walk, stop, look, gesture, status]
+ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, status]

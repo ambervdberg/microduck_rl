@@ -21,6 +21,7 @@ so call them one after another for a sequence ("turn, then walk forward")
 and each step happens in order. Check status if unsure what the robot is
 doing. A look holds until the next look or stop, so "look down then up" is
 look down, then look up, then look(0, 0) if the head should end up straight.
+The robot can sit down and stand back up, and it must stand up before it walks.
 Answer briefly after acting."""
 
 
