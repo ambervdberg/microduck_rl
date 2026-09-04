@@ -10,6 +10,8 @@ Routes:
     POST /walk      {"vx", "vy", "wz", "seconds"}
     POST /look      {"pitch", "yaw"}
     POST /gesture   {"name"}
+    POST /sit       sit down, no body
+    POST /stand     stand back up, no body
     POST /stop      zero twist, head and gesture
     POST /reset     stop, and respawn the robot where the sim supports it
 """
@@ -65,6 +67,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         "/stop": "_stop",
         "/look": "_look",
         "/gesture": "_gesture",
+        "/sit": "_sit",
+        "/stand": "_stand",
         "/reset": "_reset",
     }
 
@@ -162,6 +166,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             body.get("wz", 0.0),
             body.get("seconds"),
         )
+
+    # Sit down. The sitstand policy runs the move, the walk routes stay closed until it stands.
+    def _sit(self, _body: dict) -> dict:
+        return self._state.submit_posture(True)
+
+    # Stand back up out of a sit.
+    def _stand(self, _body: dict) -> dict:
+        return self._state.submit_posture(False)
 
     # Zero everything now.
     def _stop(self, _body: dict) -> dict:

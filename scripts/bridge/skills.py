@@ -11,6 +11,7 @@ from bridge.state import (
     BridgeState,
     GestureCmd,
     LookCmd,
+    PostureCmd,
     ResetCmd,
     StopCmd,
     WalkCmd,
@@ -40,6 +41,7 @@ class SkillRunner:
             ResetCmd: self._stop,
             LookCmd: self._look,
             GestureCmd: self._gesture,
+            PostureCmd: self._posture,
         }
 
     def tick(self, policy_enabled: bool = True) -> None:
@@ -88,6 +90,14 @@ class SkillRunner:
         """Play the named gesture."""
         self._policy.start_gesture(GESTURE_KEYS[cmd.name])
 
+    def _posture(self, cmd: PostureCmd) -> None:
+        """Flip the sitstand posture flag, and only when it is not already there."""
+        if cmd.sit:
+            self._stop_walking()
+
+        if bool(self._policy.sit_mode) != cmd.sit:
+            self._policy.toggle_sit()
+
     def _is_fallen(self) -> bool:
         """True when the trunk is no longer upright, NaN gravity included."""
         gravity_z = float(self._policy.get_projected_gravity()[2])
@@ -130,9 +140,15 @@ class SkillRunner:
             "head": [float(v) for v in self._policy.head_offset],
             "walk_seconds_left": self._walk_seconds_left,
             "gesture": self._active_gesture(),
+            "sitting": bool(self._policy.sit_mode),
+            "posture": self._posture_name(),
             "fallen": fallen,
             "actions": dict(self._actions),
         })
+
+    def _posture_name(self) -> str:
+        """Sitting or standing. The CPU runner has no rise timer, so there is no rising state."""
+        return "sitting" if self._policy.sit_mode else "standing"
 
     def _active_gesture(self) -> str | None:
         """Active gesture under the short name /gesture accepts."""

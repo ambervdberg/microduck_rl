@@ -53,6 +53,13 @@ class GestureCmd:
 
 
 @dataclass(frozen=True)
+class PostureCmd:
+    """Sit down or stand back up. The sitstand policy does the move itself."""
+
+    sit: bool
+
+
+@dataclass(frozen=True)
 class StopCmd:
     pass
 
@@ -168,6 +175,7 @@ class BridgeState:
         """Clamp a walk to the policy envelope, then queue it and echo what will run."""
         self._note_request()
         self._require_walking_policy()
+        self._require_not_seated()
 
         envelope = policy_envelope(self._policy)
         cvx = _clamp(vx, envelope.vx_min, envelope.vx_max)
@@ -208,6 +216,16 @@ class BridgeState:
         self._enqueue(GestureCmd(name))
 
         return {"gesture": name}
+
+    def submit_posture(self, sit) -> dict:
+        """Queue a sit or a stand up. Head commands stay allowed in both postures."""
+        self._note_request()
+        self._require_sit_policy()
+
+        sit = bool(sit)
+        self._enqueue(PostureCmd(sit))
+
+        return {"sit": sit}
 
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""
@@ -266,6 +284,18 @@ class BridgeState:
         """Reject walk commands the command block would silently drop."""
         if not self._policy.walking_session:
             raise ValueError("no walking policy loaded, start infer_policy.py with --walking")
+
+    def _require_sit_policy(self) -> None:
+        """Reject posture commands no loaded policy can run."""
+        if not getattr(self._policy, "sit_session", None):
+            raise ValueError("no sit policy loaded, start the runner with --sitstand")
+
+    def _require_not_seated(self) -> None:
+        """Reject walks while the robot is seated or still getting up."""
+        status = self.peek_status()
+
+        if status.get("sitting") or status.get("posture") == "rising":
+            raise ValueError("sitting, stand up first")
 
     def _enqueue(self, cmd) -> None:
         """Append one command to the pending queue."""
