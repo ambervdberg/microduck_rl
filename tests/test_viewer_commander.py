@@ -8,7 +8,7 @@ import torch
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from bridge.state import BRAIN_TIMEOUT_S, BridgeState
+from bridge.state import BRAIN_TIMEOUT_S, BridgeState, WalkCmd
 from bridge.watchdog import BrainWatchdog
 from viewer_commander import (
     GESTURE_SECONDS,
@@ -317,3 +317,17 @@ def test_watchdog_release_leaves_the_robot_seated():
     _tick_silently(commander, SHORT_TIMEOUT_S + 0.1)
     assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
     assert state.get_status()["posture"] == "sitting"
+
+
+def test_a_walk_drained_after_a_sit_in_the_same_tick_is_dropped():
+    env, state, commander = _setup(sit_session=True)
+    state.submit_posture(True)
+
+    # Queued past the bridge guard on purpose: the commander must drop it too.
+    state._enqueue(WalkCmd(0.3, 0.0, 0.0, 5.0))
+    commander.tick()
+
+    status = state.get_status()
+    assert status["twist"] == [0.0, 0.0, 0.0]
+    assert status["walk_seconds_left"] == 0.0
+    assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])

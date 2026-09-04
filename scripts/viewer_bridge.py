@@ -44,14 +44,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_env(device: str) -> RslRlVecEnvWrapper:
+def build_env(device: str, sitstand: bool = False) -> RslRlVecEnvWrapper:
     """One quiet env: no pushes, no obs noise, play config."""
     cfg = load_env_cfg(TASK, play=True)
     cfg.scene.num_envs = 1
 
-    # Ground-contact model: the walk model collides on the feet only, so a seated robot
-    # sinks through the floor. The walking policy runs on this model too.
-    cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
+    # A seated robot falls through the walk model's floor, only the feet collide.
+    if sitstand:
+        cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
+
     cfg.events.pop("push_robot", None)
     for term in cfg.observations["actor"].terms.values():
         term.noise = None
@@ -107,7 +108,7 @@ def policy_paths(args: argparse.Namespace) -> dict[str, str]:
 
 def main() -> None:
     args = parse_args()
-    env = build_env(args.device)
+    env = build_env(args.device, sitstand=bool(args.sitstand))
     unwrapped = env.unwrapped
     unwrapped.reset()
 

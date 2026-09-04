@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from bridge.state import (
     GESTURE_KEYS,
+    RISE_SECONDS,
     BridgeState,
     GestureCmd,
     LookCmd,
@@ -30,8 +31,6 @@ HEAD_YAW = 2
 GESTURE_SECONDS = 1.6
 GESTURE_AMPLITUDE_RAD = 0.35
 
-# How long the stand up takes: the trained flag flip is about a 2 s glide.
-RISE_SECONDS = 2.5
 FALLEN_GRAVITY_Z = -0.5  # projected gravity z above this means the trunk is over
 
 
@@ -108,8 +107,7 @@ class ViewerCommander:
     def _apply(self, cmd) -> None:
         self._release_joystick()
         if isinstance(cmd, WalkCmd):
-            self._twist = [cmd.vx, cmd.vy, cmd.wz]
-            self._walk_until = self._time + cmd.seconds
+            self._walk(cmd)
         elif isinstance(cmd, LookCmd):
             self._gesture = None
             self._head = [0.0, cmd.pitch, cmd.yaw, 0.0]
@@ -123,6 +121,14 @@ class ViewerCommander:
             self._clear_commands()
             self._posture = "standing"
             self._env.reset()
+
+    def _walk(self, cmd: WalkCmd) -> None:
+        """Start walking. A walk drained after a sit in the same tick is dropped."""
+        if self._posture != "standing":
+            return
+
+        self._twist = [cmd.vx, cmd.vy, cmd.wz]
+        self._walk_until = self._time + cmd.seconds
 
     def _set_posture(self, sit: bool) -> None:
         """Sit down at once, or start the rise glide back to standing."""
