@@ -73,6 +73,16 @@ SIT_SETTLE_S = 2.5
 # How long a look takes to settle, so two looks in a row are both visible.
 LOOK_SETTLE_S = 1.0
 
+# How long each trick runs, matching the bridge timers.
+ROLL_SECONDS = 2.0
+GET_UP_SECONDS = 3.0
+
+# Extra wait on top of the trick seconds. Sim time in the viewer runs slower than wall time.
+TRICK_WAIT_MARGIN_S = 4.0
+
+# What /status reports while no trick is running.
+NO_TRICK = "none"
+
 
 def _is_idle(status: dict) -> bool:
     """True when the robot has no walk or gesture running."""
@@ -122,19 +132,19 @@ def _wait_until_idle(max_wait_s: float) -> None:
             return
 
 
-def _wait_for_posture(target: str) -> None:
-    """Block until the bridge reports the target posture, or the wait cap passes.
+def _wait_for_status(field: str, target: str, max_wait_s: float) -> None:
+    """Block until a status field reaches its target, or the wait cap passes.
 
     The start window comes first: a stale snapshot from before the sim drained
     the command would otherwise end the wait at once.
     """
     time.sleep(START_WAIT_S)
-    deadline = time.monotonic() + POSTURE_MAX_WAIT_S
+    deadline = time.monotonic() + max_wait_s
 
     while time.monotonic() < deadline:
         status = _poll_status()
 
-        if "error" in status or status.get("posture") == target:
+        if "error" in status or status.get(field) == target:
             return
 
 
@@ -162,8 +172,8 @@ def _post_and_wait(path: str, body: dict, max_wait) -> str:
     return reply
 
 
-def _post_posture(path: str, target: str, settle_s: float = 0.0) -> str:
-    """POST a posture change, then wait for the robot to get there. Errors return at once.
+def _post_and_watch(path: str, field: str, target: str, max_wait_s: float, settle_s: float = 0.0) -> str:
+    """POST a command, then wait for a status field to reach its target. Errors return at once.
 
     settle_s covers a move the status cannot time: the sit flag flips at the
     start of the glide, the stand up has its own rising posture.
@@ -172,10 +182,20 @@ def _post_posture(path: str, target: str, settle_s: float = 0.0) -> str:
     echo = json.loads(reply)
 
     if "error" not in echo:
-        _wait_for_posture(target)
+        _wait_for_status(field, target, max_wait_s)
         time.sleep(settle_s)
 
     return reply
+
+
+def _post_posture(path: str, target: str, settle_s: float = 0.0) -> str:
+    """POST a sit or a stand up, then wait for the robot to reach that posture."""
+    return _post_and_watch(path, "posture", target, POSTURE_MAX_WAIT_S, settle_s)
+
+
+def _post_trick(path: str, seconds: float) -> str:
+    """POST a trick, then wait for the status to say no trick is running any more."""
+    return _post_and_watch(path, "trick", NO_TRICK, seconds + TRICK_WAIT_MARGIN_S)
 
 
 def _post_and_settle(path: str, body: dict) -> str:
@@ -239,9 +259,29 @@ def stand_up() -> str:
 
 
 @tool
+def roll() -> str:
+    """Do one forward roll, a roulade. Returns once the roll is over.
+
+    A trick to play when someone asks for it. The robot must be standing and
+    free: it cannot roll while sitting or during another trick.
+    """
+    return _post_trick("/roll", ROLL_SECONDS)
+
+
+@tool
+def get_up() -> str:
+    """Get up off the floor after a fall. Returns once the robot is back up.
+
+    Use this when the robot fell over or the user says it is lying on the
+    floor. Not for a sit: to leave a sit, call stand_up.
+    """
+    return _post_trick("/get_up", GET_UP_SECONDS)
+
+
+@tool
 def status() -> str:
     """Current robot state: active policy, speeds, head pose, fallen or not."""
     return _get("/status")
 
 
-ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, status]
+ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, roll, get_up, status]

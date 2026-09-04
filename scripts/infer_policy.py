@@ -19,6 +19,7 @@ import mujoco.viewer
 import onnxruntime as ort
 
 # scripts/ is sys.path[0] when this file is run as a script.
+from bridge.state import GET_UP_SECONDS, ROLL_SECONDS
 from gestures import GesturePlayer, default_gestures
 
 MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
@@ -140,8 +141,9 @@ class PolicyInference:
                  sit_onnx_path=None, new_cmd_obs=False, slope_onnx_path=None,
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
-                 roulade_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0):
+                 roulade_onnx_path=None, standup_onnx_path=None,
+                 kick_duration=3.0, roulade_duration=ROLL_SECONDS,
+                 standup_duration=GET_UP_SECONDS):
         self.model = model
         self.data = data
         self.action_scale = action_scale
@@ -247,6 +249,7 @@ class PolicyInference:
             ("kick_left", kick_left_onnx_path, kick_duration),
             ("kick_right", kick_right_onnx_path, kick_duration),
             ("roulade", roulade_onnx_path, roulade_duration),
+            ("standup", standup_onnx_path, standup_duration),
         ):
             if not path:
                 continue
@@ -260,6 +263,10 @@ class PolicyInference:
             self.behavior_durations[name] = duration
             print(f"{name} policy input shape: {self.behavior_sessions[name].get_inputs()[0].shape}"
                   f"  (auto-return after {duration:.1f}s)")
+
+        # The bridge unlocks /roll and /get_up off these two.
+        self.roulade_session = self.behavior_sessions.get("roulade")
+        self.standup_session = self.behavior_sessions.get("standup")
 
         # Validate at least one policy loaded. A sitstand policy can run alone
         # (it holds the stand at flag=0), unlike the old one-way sit policy.
@@ -861,8 +868,10 @@ def main():
     parser.add_argument("--kick-left", type=str, default=None, help="Path to LEFT-foot ball kick policy ONNX (press K to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
+    parser.add_argument("--standup", type=str, default=None, help="Path to standup (get up off the floor) policy ONNX (press U to trigger). Requires --new-cmd-obs.")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
-    parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
+    parser.add_argument("--roulade-duration", type=float, default=ROLL_SECONDS, help=f"Seconds the roulade policy stays active before handing back to standing/walking (default: {ROLL_SECONDS}, ~the roll itself; the standing/walking policy takes over for the settle)")
+    parser.add_argument("--standup-duration", type=float, default=GET_UP_SECONDS, help=f"Seconds the standup policy stays active before handing back to standing/walking (default: {GET_UP_SECONDS})")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
     parser.add_argument("--lin-vel-y", type=float, default=0.0, help="Initial linear velocity Y command (m/s)")
     parser.add_argument("--ang-vel-z", type=float, default=0.0, help="Initial angular velocity Z command (rad/s)")
@@ -899,12 +908,12 @@ def main():
         parser.error("At least one of --walking, --standing or --sitstand must be provided")
     if args.sitstand and not args.new_cmd_obs:
         parser.error("--sitstand policies use the unified 13D command obs (61D); add --new-cmd-obs")
-    if (args.kick_left or args.kick_right or args.roulade) and not args.new_cmd_obs:
-        parser.error("--kick-left/--kick-right/--roulade policies use the unified 13D command obs (61D); add --new-cmd-obs")
+    if (args.kick_left or args.kick_right or args.roulade or args.standup) and not args.new_cmd_obs:
+        parser.error("--kick-left/--kick-right/--roulade/--standup policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if args.bridge is not None and not args.new_cmd_obs:
         parser.error("--bridge writes the unified 13D command block (61D obs), so add --new-cmd-obs")
-    if (args.kick_left or args.kick_right or args.roulade) and args.roller:
-        parser.error("kick/roulade policies are trained on the walking robot, not the roller model")
+    if (args.kick_left or args.kick_right or args.roulade or args.standup) and args.roller:
+        parser.error("kick/roulade/standup policies are not trained on the roller model")
 
     # Parse delay arguments
     delay_min_lag = 0
@@ -993,8 +1002,10 @@ def main():
         kick_left_onnx_path=args.kick_left,
         kick_right_onnx_path=args.kick_right,
         roulade_onnx_path=args.roulade,
+        standup_onnx_path=args.standup,
         kick_duration=args.kick_duration,
         roulade_duration=args.roulade_duration,
+        standup_duration=args.standup_duration,
     )
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
@@ -1072,7 +1083,7 @@ def main():
         print(f"{kind} policy: loaded  (press Y to toggle)")
     if policy.slope_session:
         print(f"Slope policy: loaded  (press Y to toggle, passive descent)")
-    _behavior_keys = {"kick_left": "K", "kick_right": "L", "roulade": "R"}
+    _behavior_keys = {"kick_left": "K", "kick_right": "L", "roulade": "R", "standup": "U"}
     for _name in policy.behavior_sessions:
         print(f"{_name} policy: loaded  (press {_behavior_keys[_name]}, "
               f"auto-return after {policy.behavior_durations[_name]:.1f}s)")
@@ -1199,6 +1210,8 @@ def main():
                 policy.trigger_behavior("kick_right")
             elif key == "r":
                 policy.trigger_behavior("roulade")
+            elif key == "u":
+                policy.trigger_behavior("standup")
             elif key == "q":
                 quit_requested = True
                 print("Quit requested")
@@ -1268,6 +1281,7 @@ def main():
     print("  K:                kick with LEFT foot (requires --kick-left)")
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
+    print("  U:                get up off the floor (requires --standup)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
     print("  N:                nod yes   (scripted head gesture, no extra policy)")
     print("  M:                shake no  (scripted head gesture, no extra policy)")

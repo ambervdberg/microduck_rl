@@ -353,3 +353,77 @@ def test_stand_up_waits_the_start_window_and_does_not_settle(monkeypatch):
         server.shutdown()
 
     assert clock.now == pytest.approx(tools.START_WAIT_S + tools.IDLE_POLL_S)
+
+
+def _rolling():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "rolling"}
+
+
+def _getting_up():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "getting_up"}
+
+
+def _no_trick():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none"}
+
+
+def test_roll_posts_and_waits_until_the_trick_is_over(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_rolling(), _rolling(), _no_trick()])
+    try:
+        tools.roll.invoke({})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/roll", "/status", "/status", "/status"]
+    assert _commands(received) == [("POST", "/roll", {})]
+
+
+def test_get_up_posts_and_waits_until_the_trick_is_over(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_getting_up(), _no_trick()])
+    try:
+        tools.get_up.invoke({})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/get_up", "/status", "/status"]
+    assert _commands(received) == [("POST", "/get_up", {})]
+
+
+def test_roll_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "a trick is running, wait for it"}))
+    try:
+        result = json.loads(tools.roll.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert "error" in result
+    assert _polls(received) == []
+
+
+def test_roll_wait_gives_up_after_the_cap_from_the_roll_seconds(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_rolling()])
+    try:
+        tools.roll.invoke({})
+    finally:
+        server.shutdown()
+
+    cap = tools.ROLL_SECONDS + tools.TRICK_WAIT_MARGIN_S
+    assert len(_polls(received)) == int(cap / tools.IDLE_POLL_S)
+
+
+def test_get_up_wait_gives_up_after_the_cap_from_the_get_up_seconds(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_getting_up()])
+    try:
+        tools.get_up.invoke({})
+    finally:
+        server.shutdown()
+
+    cap = tools.GET_UP_SECONDS + tools.TRICK_WAIT_MARGIN_S
+    assert len(_polls(received)) == int(cap / tools.IDLE_POLL_S)
+
+
+def test_roll_and_get_up_are_registered_tools():
+    names = [t.name for t in tools.ALL_TOOLS]
+    assert "roll" in names
+    assert "get_up" in names

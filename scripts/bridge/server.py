@@ -12,6 +12,8 @@ Routes:
     POST /gesture   {"name"}
     POST /sit       sit down, no body
     POST /stand     stand back up, no body
+    POST /roll      one forward roll, no body
+    POST /get_up    get up off the floor, no body
     POST /stop      zero twist, head and gesture
     POST /reset     stop, and respawn the robot where the sim supports it
 """
@@ -69,6 +71,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         "/gesture": "_gesture",
         "/sit": "_sit",
         "/stand": "_stand",
+        "/roll": "_roll",
+        "/get_up": "_get_up",
         "/reset": "_reset",
     }
 
@@ -174,6 +178,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # Stand back up out of a sit.
     def _stand(self, _body: dict) -> dict:
         return self._state.submit_posture(False)
+
+    # One forward roll. The roulade policy owns the robot until its timer ends.
+    def _roll(self, _body: dict) -> dict:
+        return self._state.submit_trick("roll")
+
+    # Get up off the floor. For a seated robot /stand is the route instead.
+    def _get_up(self, _body: dict) -> dict:
+        return self._state.submit_trick("get_up")
 
     # Zero everything now.
     def _stop(self, _body: dict) -> dict:

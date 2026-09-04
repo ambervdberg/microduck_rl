@@ -8,7 +8,14 @@ import torch
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from bridge.state import BRAIN_TIMEOUT_S, BridgeState, WalkCmd
+from bridge.state import (
+    BRAIN_TIMEOUT_S,
+    GET_UP_SECONDS,
+    NO_TRICK,
+    ROLL_SECONDS,
+    BridgeState,
+    WalkCmd,
+)
 from bridge.watchdog import BrainWatchdog
 from viewer_commander import (
     GESTURE_SECONDS,
@@ -55,9 +62,14 @@ class _Env:
         self.resets += 1
 
 
-def _setup(sit_session: bool = False):
+def _setup(sit_session: bool = False, roll: bool = False, get_up: bool = False):
     env = _Env()
-    state = BridgeState(ViewerLimits(sit_session=sit_session))
+    limits = ViewerLimits(
+        sit_session=sit_session,
+        roulade_session=roll,
+        standup_session=get_up,
+    )
+    state = BridgeState(limits)
     commander = ViewerCommander(env, state, DT)
     return env, state, commander
 
@@ -331,3 +343,136 @@ def test_a_walk_drained_after_a_sit_in_the_same_tick_is_dropped():
     assert status["twist"] == [0.0, 0.0, 0.0]
     assert status["walk_seconds_left"] == 0.0
     assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
+
+
+def _rolling_setup():
+    """A commander with a roulade policy loaded, one tick into the roll."""
+    env, state, commander = _setup(roll=True)
+    state.submit_trick("roll")
+    commander.tick()
+    return env, state, commander
+
+
+def _tick_for(commander, seconds):
+    """Run the commander over a stretch of sim time, with a margin of two steps."""
+    for _ in range(int(seconds / DT) + 2):
+        commander.tick()
+
+
+def test_tricks_are_offered_only_with_their_policy():
+    _env, state, commander = _setup()
+    commander.tick()
+    actions = state.get_status()["actions"]
+    assert actions["roulade"] is False
+    assert actions["get up off the floor"] is False
+
+    _env, state, commander = _setup(roll=True, get_up=True)
+    commander.tick()
+    actions = state.get_status()["actions"]
+    assert actions["roulade"] is True
+    assert actions["get up off the floor"] is True
+
+
+def test_roll_without_a_roll_policy_is_refused():
+    _env, state, _commander = _setup()
+    with pytest.raises(ValueError, match="no roll policy loaded"):
+        state.submit_trick("roll")
+
+
+def test_get_up_without_a_get_up_policy_is_refused():
+    _env, state, _commander = _setup()
+    with pytest.raises(ValueError, match="no get_up policy loaded"):
+        state.submit_trick("get_up")
+
+
+def test_roll_swaps_the_active_policy_and_zeroes_the_command():
+    env, state, commander = _rolling_setup()
+    assert commander.active_policy() == "roll"
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+    assert state.get_status()["trick"] == "rolling"
+
+
+def test_get_up_swaps_to_its_own_policy():
+    _env, state, commander = _setup(get_up=True)
+    state.submit_trick("get_up")
+    commander.tick()
+    assert commander.active_policy() == "get_up"
+    assert state.get_status()["trick"] == "getting_up"
+
+
+def test_roll_cancels_a_running_walk():
+    env, state, commander = _setup(roll=True)
+    state.submit_walk(0.3, 0.0, 0.0, 5.0)
+    commander.tick()
+    state.submit_trick("roll")
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert state.get_status()["walk_seconds_left"] == 0.0
+
+
+def test_look_is_ignored_while_a_trick_runs():
+    env, state, commander = _rolling_setup()
+    state.submit_look(0.4, -0.6)
+    commander.tick()
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_gesture_is_ignored_while_a_trick_runs():
+    env, state, commander = _rolling_setup()
+    state.submit_gesture("nod")
+    _tick_for(commander, 0.2)
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+    assert state.get_status()["gesture"] is None
+
+
+def test_roll_hands_back_to_walking_at_the_timer():
+    env, state, commander = _rolling_setup()
+    _tick_for(commander, ROLL_SECONDS)
+    assert commander.active_policy() == "walking"
+    assert state.get_status()["trick"] == NO_TRICK
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_get_up_runs_for_its_own_duration():
+    _env, state, commander = _setup(get_up=True)
+    state.submit_trick("get_up")
+    commander.tick()
+
+    _tick_for(commander, ROLL_SECONDS)
+    assert commander.active_policy() == "get_up"
+
+    _tick_for(commander, GET_UP_SECONDS)
+    assert commander.active_policy() == "walking"
+
+
+def test_walk_is_refused_while_a_trick_runs_and_allowed_after():
+    _env, state, commander = _rolling_setup()
+    with pytest.raises(ValueError, match="trick is running"):
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+
+    _tick_for(commander, ROLL_SECONDS)
+    state.submit_walk(0.2, 0.0, 0.0, 2.0)
+
+
+def test_reset_clears_a_running_trick():
+    env, state, commander = _rolling_setup()
+    state.submit_reset()
+    commander.tick()
+    assert commander.active_policy() == "walking"
+    assert state.get_status()["trick"] == NO_TRICK
+    assert env.resets == 1
+
+
+def test_status_reports_no_trick_while_walking():
+    _env, state, commander = _setup(roll=True)
+    commander.tick()
+    assert state.get_status()["trick"] == NO_TRICK
+
+
+def test_body_pose_is_zeroed_every_tick():
+    env, _, commander = _setup()
+    body = env.command_manager.get_term("body_pose")
+    body._command[:] = 0.3
+    commander.tick()
+    assert body._command[0].tolist() == [0.0] * 6

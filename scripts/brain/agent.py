@@ -22,6 +22,8 @@ and each step happens in order. Check status if unsure what the robot is
 doing. A look holds until the next look or stop, so "look down then up" is
 look down, then look up, then look(0, 0) if the head should end up straight.
 The robot can sit down and stand back up, and it must stand up before it walks.
+It can also do a forward roll when asked, and get up off the floor after a
+fall. Leaving a sit is stand_up, not get_up.
 Answer briefly after acting."""
 
 
