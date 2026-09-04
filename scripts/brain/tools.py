@@ -67,6 +67,9 @@ GESTURE_MAX_WAIT_S = 6.0
 # Wait cap for a sit or a stand up. Sim time in the viewer runs slower than wall time.
 POSTURE_MAX_WAIT_S = 8.0
 
+# How long the sit itself takes once the status says sitting: about a 2 s glide in sim time.
+SIT_SETTLE_S = 2.5
+
 # How long a look takes to settle, so two looks in a row are both visible.
 LOOK_SETTLE_S = 1.0
 
@@ -120,7 +123,12 @@ def _wait_until_idle(max_wait_s: float) -> None:
 
 
 def _wait_for_posture(target: str) -> None:
-    """Block until the bridge reports the target posture, or the wait cap passes."""
+    """Block until the bridge reports the target posture, or the wait cap passes.
+
+    The start window comes first: a stale snapshot from before the sim drained
+    the command would otherwise end the wait at once.
+    """
+    time.sleep(START_WAIT_S)
     deadline = time.monotonic() + POSTURE_MAX_WAIT_S
 
     while time.monotonic() < deadline:
@@ -154,13 +162,18 @@ def _post_and_wait(path: str, body: dict, max_wait) -> str:
     return reply
 
 
-def _post_posture(path: str, target: str) -> str:
-    """POST a posture change, then wait for the robot to get there. Errors return at once."""
+def _post_posture(path: str, target: str, settle_s: float = 0.0) -> str:
+    """POST a posture change, then wait for the robot to get there. Errors return at once.
+
+    settle_s covers a move the status cannot time: the sit flag flips at the
+    start of the glide, the stand up has its own rising posture.
+    """
     reply = _post(path, {})
     echo = json.loads(reply)
 
     if "error" not in echo:
         _wait_for_posture(target)
+        time.sleep(settle_s)
 
     return reply
 
@@ -216,7 +229,7 @@ def sit() -> str:
 
     The robot cannot walk while sitting. Call stand_up first.
     """
-    return _post_posture("/sit", "sitting")
+    return _post_posture("/sit", "sitting", SIT_SETTLE_S)
 
 
 @tool

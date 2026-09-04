@@ -328,3 +328,28 @@ def test_sit_and_stand_up_are_registered_tools():
     names = [t.name for t in tools.ALL_TOOLS]
     assert "sit" in names
     assert "stand_up" in names
+
+
+def test_sit_waits_the_start_window_then_settles(monkeypatch):
+    clock = _FakeClock()
+    _received, server = _scripted_bridge(monkeypatch, [_seated()])
+    monkeypatch.setattr(tools, "time", clock)
+    try:
+        tools.sit.invoke({})
+    finally:
+        server.shutdown()
+
+    # Start window, one poll that reads the target, then the sit settle time.
+    assert clock.now == pytest.approx(tools.START_WAIT_S + tools.IDLE_POLL_S + tools.SIT_SETTLE_S)
+
+
+def test_stand_up_waits_the_start_window_and_does_not_settle(monkeypatch):
+    clock = _FakeClock()
+    _received, server = _scripted_bridge(monkeypatch, [_standing()])
+    monkeypatch.setattr(tools, "time", clock)
+    try:
+        tools.stand_up.invoke({})
+    finally:
+        server.shutdown()
+
+    assert clock.now == pytest.approx(tools.START_WAIT_S + tools.IDLE_POLL_S)
