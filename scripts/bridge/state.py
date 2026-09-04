@@ -22,6 +22,9 @@ WALK_MAX_S = 10.0
 # Seconds of silence from the brain before the bridge releases twist and head.
 BRAIN_TIMEOUT_S = 10.0
 
+# How long the stand up takes: the trained flag flip is about a 2 s glide.
+RISE_SECONDS = 2.5
+
 _GESTURE_TABLE = default_gestures()
 
 # Short API name -> keyboard key that starts the gesture.
@@ -217,7 +220,7 @@ class BridgeState:
 
         return {"gesture": name}
 
-    def submit_posture(self, sit) -> dict:
+    def submit_posture(self, sit: bool) -> dict:
         """Queue a sit or a stand up. Head commands stay allowed in both postures."""
         self._note_request()
         self._require_sit_policy()
@@ -291,11 +294,19 @@ class BridgeState:
             raise ValueError("no sit policy loaded, start the runner with --sitstand")
 
     def _require_not_seated(self) -> None:
-        """Reject walks while the robot is seated or still getting up."""
+        """Reject walks while the robot is seated, still getting up, or a sit is queued."""
         status = self.peek_status()
+        seated = status.get("sitting") or status.get("posture") == "rising"
 
-        if status.get("sitting") or status.get("posture") == "rising":
+        if seated or self._sit_queued():
             raise ValueError("sitting, stand up first")
+
+    def _sit_queued(self) -> bool:
+        """True when the last posture command still waiting to be drained is a sit."""
+        with self._lock:
+            postures = [cmd.sit for cmd in self._pending if isinstance(cmd, PostureCmd)]
+
+        return bool(postures) and postures[-1]
 
     def _enqueue(self, cmd) -> None:
         """Append one command to the pending queue."""
