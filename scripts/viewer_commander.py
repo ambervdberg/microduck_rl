@@ -1,7 +1,7 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
 The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
-StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
+TrickCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
 to PolicyInference. Here ViewerCommander applies them to the env's command terms
 instead, once per policy step, and publishes the status the bridge serves on /status.
 """
@@ -12,13 +12,16 @@ from dataclasses import dataclass, field
 
 from bridge.state import (
     GESTURE_KEYS,
+    NO_TRICK,
     RISE_SECONDS,
+    TRICKS,
     BridgeState,
     GestureCmd,
     LookCmd,
     PostureCmd,
     ResetCmd,
     StopCmd,
+    TrickCmd,
     WalkCmd,
     available_actions,
 )
@@ -53,6 +56,8 @@ class ViewerLimits:
     head_max: float = 1.4
     walking_session: bool = True  # truthy: a walking policy is loaded
     sit_session: bool = False  # truthy: a sitstand policy is loaded
+    roulade_session: bool = False  # truthy: a roulade policy is loaded
+    standup_session: bool = False  # truthy: a get up policy is loaded
     gesture_player: _GestureKeys = field(default_factory=_GestureKeys)
 
 
@@ -76,6 +81,8 @@ class ViewerCommander:
         self._gesture: _Gesture | None = None
         self._posture = "standing"
         self._rise_until = 0.0
+        self._trick: str | None = None
+        self._trick_until = 0.0
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
@@ -91,6 +98,7 @@ class ViewerCommander:
             self._twist = [0.0, 0.0, 0.0]
 
         self._expire_rise()
+        self._expire_trick()
 
         if self._watchdog.tick():
             self._release()
@@ -100,11 +108,17 @@ class ViewerCommander:
 
     def active_policy(self) -> str:
         """Which loaded ONNX drives the robot right now."""
+        if self._trick is not None:
+            return self._trick
+
         return "sit" if self._posture in ("sitting", "rising") else "walking"
 
     # Command handlers.
 
     def _apply(self, cmd) -> None:
+        if self._trick_runs() and not isinstance(cmd, (StopCmd, ResetCmd)):
+            return
+
         self._release_joystick()
         if isinstance(cmd, WalkCmd):
             self._walk(cmd)
@@ -115,10 +129,13 @@ class ViewerCommander:
             self._gesture = _Gesture(cmd.name, self._time)
         elif isinstance(cmd, PostureCmd):
             self._set_posture(cmd.sit)
+        elif isinstance(cmd, TrickCmd):
+            self._start_trick(cmd.name)
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
             self._clear_commands()
+            self._clear_trick()
             self._posture = "standing"
             self._env.reset()
 
@@ -146,6 +163,33 @@ class ViewerCommander:
         """The rise glide is over: the robot is standing again."""
         if self._posture == "rising" and self._time >= self._rise_until:
             self._posture = "standing"
+
+    def _start_trick(self, name: str) -> None:
+        """Hand the robot to a trick policy on an all-zero command block."""
+        self._clear_commands()
+        self._trick = name
+        self._trick_until = self._time + TRICKS[name].seconds
+
+    def _expire_trick(self) -> None:
+        """The trick is over: the walking policy takes over on a zero twist."""
+        if self._trick_runs() and self._time >= self._trick_until:
+            self._clear_trick()
+
+    def _clear_trick(self) -> None:
+        """Drop the trick timer and report no trick again."""
+        self._trick = None
+        self._trick_until = 0.0
+
+    def _trick_runs(self) -> bool:
+        """True while a trick policy owns the robot."""
+        return self._trick is not None
+
+    def _trick_status(self) -> str:
+        """The running trick under the name /status speaks, or "none"."""
+        if self._trick is None:
+            return NO_TRICK
+
+        return TRICKS[self._trick].status
 
     def _release(self) -> None:
         """The brain went quiet: zero the twist and, unless a gesture is playing, the head."""
@@ -240,6 +284,7 @@ class ViewerCommander:
             "gesture": self._gesture.name if self._gesture else None,
             "sitting": self._posture == "sitting",
             "posture": self._posture,
+            "trick": self._trick_status(),
             "fallen": self._is_fallen(),
             "actions": dict(self._actions),
         })

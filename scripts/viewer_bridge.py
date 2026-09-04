@@ -1,11 +1,12 @@
 """Viser viewer plus the bridge API, so a brain can drive the robot you watch in the browser.
 
     uv run scripts/viewer_bridge.py --policy walk_lowspeed-range.onnx [--sitstand sitstand.onnx]
+        [--roulade roulade.onnx] [--standup standup.onnx]
         [--bridge-port 8630] [--viewer-port 8632]
 
 Then open http://localhost:8632 for the viewer. The bridge listens on 127.0.0.1:<bridge-port>
 with the same routes infer_policy.py --bridge serves (/walk, /look, /gesture, /sit, /stand,
-/stop, /reset, /status), so scripts/brain works unchanged.
+/roll, /get_up, /stop, /reset, /status), so scripts/brain works unchanged.
 """
 from __future__ import annotations
 
@@ -38,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", required=True, help="ONNX walking policy")
     parser.add_argument("--sitstand", help="ONNX sitstand policy, unlocks /sit and /stand")
+    parser.add_argument("--roulade", help="ONNX roulade policy, unlocks /roll")
+    parser.add_argument("--standup", help="ONNX standup policy, unlocks /get_up")
     parser.add_argument("--bridge-port", type=int, default=8630)
     parser.add_argument("--viewer-port", type=int, default=8632)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -45,11 +48,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_env(device: str, sitstand: bool = False) -> RslRlVecEnvWrapper:
-    """One quiet env: no pushes, no obs noise, play config."""
+    """One quiet env: no pushes, no obs noise, play config.
+
+    sitstand also stands for roll and get up: all three need the ground-contact model.
+    """
     cfg = load_env_cfg(TASK, play=True)
     cfg.scene.num_envs = 1
 
-    # A seated robot falls through the walk model's floor, only the feet collide.
+    # A robot on the ground falls through the walk model's floor, only the feet collide.
     if sitstand:
         cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
 
@@ -100,19 +106,34 @@ def policy_paths(args: argparse.Namespace) -> dict[str, str]:
     """The ONNX files to load, keyed by the name the commander uses."""
     paths = {"walking": args.policy}
 
-    if args.sitstand:
-        paths["sit"] = args.sitstand
+    for name, path in (("sit", args.sitstand), ("roll", args.roulade), ("get_up", args.standup)):
+        if path:
+            paths[name] = path
 
     return paths
 
 
+def bridge_limits(args: argparse.Namespace) -> ViewerLimits:
+    """The envelope plus which sessions the flags loaded, so the bridge unlocks those routes."""
+    return ViewerLimits(
+        sit_session=bool(args.sitstand),
+        roulade_session=bool(args.roulade),
+        standup_session=bool(args.standup),
+    )
+
+
+def needs_ground_contact(args: argparse.Namespace) -> bool:
+    """True when a loaded policy puts the robot on the ground and needs its collisions."""
+    return bool(args.sitstand or args.roulade or args.standup)
+
+
 def main() -> None:
     args = parse_args()
-    env = build_env(args.device, sitstand=bool(args.sitstand))
+    env = build_env(args.device, needs_ground_contact(args))
     unwrapped = env.unwrapped
     unwrapped.reset()
 
-    state = BridgeState(ViewerLimits(sit_session=bool(args.sitstand)))
+    state = BridgeState(bridge_limits(args))
     commander = ViewerCommander(unwrapped, state, unwrapped.step_dt)
     start_bridge(state, args.bridge_port)
     print(f"[bridge] listening on 127.0.0.1:{args.bridge_port}")

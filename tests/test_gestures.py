@@ -145,5 +145,5 @@ class TestDefaultGestures:
             assert cfg.amplitude_rad < trained_max_rad
 
     def test_should_not_collide_with_existing_infer_policy_keys(self):
-        taken = set("tgklryhbpaezs ")
+        taken = set("tgklryhbpaezsu ")
         assert taken.isdisjoint(default_gestures().keys())
