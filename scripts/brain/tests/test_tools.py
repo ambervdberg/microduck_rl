@@ -267,3 +267,89 @@ def test_look_settles_on_success_and_returns_at_once_on_an_error(monkeypatch):
         assert clock.now == tools.LOOK_SETTLE_S
     finally:
         server.shutdown()
+
+
+def _seated():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "sitting", "sitting": True}
+
+
+def _rising():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "rising", "sitting": False}
+
+
+def _standing():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "sitting": False}
+
+
+def test_sit_posts_and_waits_for_the_sitting_posture(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_standing(), _seated()])
+    try:
+        tools.sit.invoke({})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/sit", "/status", "/status"]
+    assert _commands(received) == [("POST", "/sit", {})]
+
+
+def test_stand_up_waits_through_the_rise(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_seated(), _rising(), _standing()])
+    try:
+        tools.stand_up.invoke({})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/stand", "/status", "/status", "/status"]
+
+
+def test_posture_wait_gives_up_after_its_own_cap(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_standing()])
+    try:
+        tools.sit.invoke({})
+    finally:
+        server.shutdown()
+
+    assert len(_polls(received)) == int(tools.POSTURE_MAX_WAIT_S / tools.IDLE_POLL_S)
+
+
+def test_sit_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_standing()])
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "no sit policy loaded"}))
+    try:
+        result = json.loads(tools.sit.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert "error" in result
+    assert _polls(received) == []
+
+
+def test_sit_and_stand_up_are_registered_tools():
+    names = [t.name for t in tools.ALL_TOOLS]
+    assert "sit" in names
+    assert "stand_up" in names
+
+
+def test_sit_waits_the_start_window_then_settles(monkeypatch):
+    clock = _FakeClock()
+    _received, server = _scripted_bridge(monkeypatch, [_seated()])
+    monkeypatch.setattr(tools, "time", clock)
+    try:
+        tools.sit.invoke({})
+    finally:
+        server.shutdown()
+
+    # Start window, one poll that reads the target, then the sit settle time.
+    assert clock.now == pytest.approx(tools.START_WAIT_S + tools.IDLE_POLL_S + tools.SIT_SETTLE_S)
+
+
+def test_stand_up_waits_the_start_window_and_does_not_settle(monkeypatch):
+    clock = _FakeClock()
+    _received, server = _scripted_bridge(monkeypatch, [_standing()])
+    monkeypatch.setattr(tools, "time", clock)
+    try:
+        tools.stand_up.invoke({})
+    finally:
+        server.shutdown()
+
+    assert clock.now == pytest.approx(tools.START_WAIT_S + tools.IDLE_POLL_S)

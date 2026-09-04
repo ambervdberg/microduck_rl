@@ -8,9 +8,11 @@ indices: head_offset[1] is head_pitch, head_offset[2] is head_yaw.
 from bridge.state import (
     GESTURE_KEYS,
     GESTURE_SHORT_NAMES,
+    RISE_SECONDS,
     BridgeState,
     GestureCmd,
     LookCmd,
+    PostureCmd,
     ResetCmd,
     StopCmd,
     WalkCmd,
@@ -29,17 +31,18 @@ class SkillRunner:
         self._state = state
         self._control_dt = float(control_dt)
         self._walk_seconds_left = 0.0
+        self._rise_seconds_left = 0.0
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(policy)
 
         # Command class to the bound handler that applies it.
-        # Reset lands on _stop: PolicyInference has no sim to respawn.
         self._handlers = {
             WalkCmd: self._walk,
             StopCmd: self._stop,
-            ResetCmd: self._stop,
+            ResetCmd: self._reset,
             LookCmd: self._look,
             GestureCmd: self._gesture,
+            PostureCmd: self._posture,
         }
 
     def tick(self, policy_enabled: bool = True) -> None:
@@ -54,6 +57,7 @@ class SkillRunner:
 
         if policy_enabled:
             self._expire_walk()
+            self._expire_rise()
 
             if self._watchdog.tick():
                 self._release()
@@ -77,6 +81,14 @@ class SkillRunner:
         self._stop_walking()
         self._policy._update_command()
 
+    def _reset(self, cmd) -> None:
+        """Stop everything and stand back up. PolicyInference has no sim to respawn."""
+        self._stop(cmd)
+        self._rise_seconds_left = 0.0
+
+        if self._policy.sit_mode:
+            self._policy.toggle_sit()
+
     def _look(self, cmd: LookCmd) -> None:
         """Cancel any gesture and hold the head at the given pose."""
         self._policy.gesture_player.cancel()
@@ -87,6 +99,17 @@ class SkillRunner:
     def _gesture(self, cmd: GestureCmd) -> None:
         """Play the named gesture."""
         self._policy.start_gesture(GESTURE_KEYS[cmd.name])
+
+    def _posture(self, cmd: PostureCmd) -> None:
+        """Flip the sitstand posture flag, and only when it is not already there."""
+        if cmd.sit:
+            self._stop_walking()
+
+        if bool(self._policy.sit_mode) == cmd.sit:
+            return
+
+        self._policy.toggle_sit()
+        self._rise_seconds_left = 0.0 if cmd.sit else RISE_SECONDS
 
     def _is_fallen(self) -> bool:
         """True when the trunk is no longer upright, NaN gravity included."""
@@ -104,6 +127,11 @@ class SkillRunner:
 
         if self._walk_seconds_left <= 0.0:
             self._stop_walking()
+
+    def _expire_rise(self) -> None:
+        """Count the stand up down by one control step. At zero the robot is standing."""
+        if self._rise_seconds_left > 0.0:
+            self._rise_seconds_left = max(0.0, self._rise_seconds_left - self._control_dt)
 
     def _release(self) -> None:
         """Zero the twist and, unless a gesture is playing, the head pose."""
@@ -126,13 +154,29 @@ class SkillRunner:
         self._state.set_status({
             "ready": policy_enabled,
             "policy": self._policy.current_policy,
-            "twist": [float(v) for v in self._policy.command[0:3]],
+            "twist": self._status_twist(),
             "head": [float(v) for v in self._policy.head_offset],
             "walk_seconds_left": self._walk_seconds_left,
             "gesture": self._active_gesture(),
+            "sitting": bool(self._policy.sit_mode),
+            "posture": self._posture_name(),
             "fallen": fallen,
             "actions": dict(self._actions),
         })
+
+    def _status_twist(self) -> list[float]:
+        """The twist the policy sees. On the sit policy slot 0 is the posture flag, not vx."""
+        if self._policy.current_policy == "sit":
+            return [0.0, 0.0, 0.0]
+
+        return [float(v) for v in self._policy.command[0:3]]
+
+    def _posture_name(self) -> str:
+        """Sitting, still getting up, or standing."""
+        if self._policy.sit_mode:
+            return "sitting"
+
+        return "rising" if self._rise_seconds_left > 0.0 else "standing"
 
     def _active_gesture(self) -> str | None:
         """Active gesture under the short name /gesture accepts."""

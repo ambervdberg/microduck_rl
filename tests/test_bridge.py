@@ -20,11 +20,13 @@ from bridge.state import (  # noqa: E402
     BRAIN_TIMEOUT_S,
     HEAD_PITCH_MAX,
     HEAD_YAW_MAX,
+    RISE_SECONDS,
     WALK_DEFAULT_S,
     WALK_MAX_S,
     BridgeState,
     GestureCmd,
     LookCmd,
+    PostureCmd,
     ResetCmd,
     StopCmd,
     WalkCmd,
@@ -68,7 +70,7 @@ class FakeGesturePlayer:
 class FakePolicy:
     """Mimics the PolicyInference surface the bridge touches."""
 
-    def __init__(self, gravity_z: float = -1.0, walking: bool = True, gestures=None):
+    def __init__(self, gravity_z: float = -1.0, walking: bool = True, gestures=None, sit: bool = False):
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.head_offset = np.zeros(4, dtype=np.float32)
         self.command = np.zeros(13, dtype=np.float32)
@@ -78,6 +80,9 @@ class FakePolicy:
         self.command_updates = 0
         self.gravity_z = gravity_z
         self.walking_session = object() if walking else None
+        self.sit_session = object() if sit else None
+        self.sit_mode = False
+        self.sit_toggles = 0
         self.switch_threshold = 0.05
         self.vel_max_x = 0.3
         self.vel_min_x = -0.3
@@ -100,8 +105,18 @@ class FakePolicy:
         if self.current_policy == "walking":
             cmd[0:3] = self.vel_cmd
 
+        # The sitstand session writes the posture flag where the twist vx lives.
+        if self.current_policy == "sit":
+            cmd[0] = 1.0 if self.sit_mode else 0.0
+
         cmd[3:7] = self.head_offset
         self.command = cmd
+
+    def toggle_sit(self):
+        self.sit_toggles += 1
+        self.sit_mode = not self.sit_mode
+        self.current_policy = "sit" if self.sit_mode else "walking"
+        self._update_command()
 
     def start_gesture(self, key):
         cfg = self.gesture_player.trigger(key)
@@ -241,6 +256,70 @@ class TestBridgeState:
         before = state.request_count()
         assert state.submit_reset() == {"reset": True}
         assert state.drain() == [ResetCmd()]
+        assert state.request_count() == before + 1
+
+
+class TestPostureState:
+    def test_sit_and_stand_are_queued(self):
+        state, _ = _pair(sit=True)
+        assert state.submit_posture(True) == {"sit": True}
+        assert state.submit_posture(False) == {"sit": False}
+        assert state.drain() == [PostureCmd(True), PostureCmd(False)]
+
+    def test_sit_without_a_sit_policy_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError):
+            state.submit_posture(True)
+        assert state.drain() == []
+
+    def test_walk_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True)
+        state.set_status({"sitting": True, "posture": "sitting"})
+        with pytest.raises(ValueError, match="stand up first"):
+            state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == []
+
+    def test_walk_while_rising_is_rejected(self):
+        state, _ = _pair(sit=True)
+        state.set_status({"sitting": False, "posture": "rising"})
+        with pytest.raises(ValueError, match="stand up first"):
+            state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == []
+
+    def test_walk_is_allowed_again_once_standing(self):
+        state, _ = _pair(sit=True)
+        state.set_status({"sitting": False, "posture": "standing"})
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == [WalkCmd(0.2, 0.0, 0.0, 2.0)]
+
+    def test_walk_with_a_sit_still_queued_is_rejected(self):
+        state, _ = _pair(sit=True)
+        state.set_status({"sitting": False, "posture": "standing"})
+        state.submit_posture(True)
+        with pytest.raises(ValueError, match="stand up first"):
+            state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == [PostureCmd(True)]
+
+    def test_walk_with_a_queued_stand_after_the_sit_is_allowed(self):
+        state, _ = _pair(sit=True)
+        state.set_status({"sitting": False, "posture": "standing"})
+        state.submit_posture(True)
+        state.submit_posture(False)
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == [PostureCmd(True), PostureCmd(False), WalkCmd(0.2, 0.0, 0.0, 2.0)]
+
+    def test_look_gesture_and_reset_stay_allowed_while_seated(self):
+        state, _ = _pair(sit=True)
+        state.set_status({"sitting": True, "posture": "sitting"})
+        state.submit_look(0.2, 0.1)
+        state.submit_gesture("nod")
+        state.submit_reset()
+        assert state.drain() == [LookCmd(0.2, 0.1), GestureCmd("nod"), ResetCmd()]
+
+    def test_sit_counts_as_a_brain_request(self):
+        state, _ = _pair(sit=True)
+        before = state.request_count()
+        state.submit_posture(True)
         assert state.request_count() == before + 1
 
 
@@ -487,6 +566,92 @@ class TestSkillsTick:
         assert state.get_status()["walk_seconds_left"] == pytest.approx(0.0)
 
 
+class TestSkillsPosture:
+    def test_sit_toggles_the_policy_once(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_posture(True)
+        runner.tick()
+        assert policy.sit_mode is True
+        assert policy.sit_toggles == 1
+
+    def test_sit_twice_leaves_the_posture_alone(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_posture(True)
+        state.submit_posture(True)
+        runner.tick()
+        assert policy.sit_toggles == 1
+
+    def test_stand_toggles_back(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_posture(True)
+        runner.tick()
+        state.submit_posture(False)
+        runner.tick()
+        assert policy.sit_mode is False
+        assert policy.sit_toggles == 2
+
+    def test_sitting_cancels_a_running_walk(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.2, 0.0, 0.0, 5.0)
+        runner.tick()
+        state.submit_posture(True)
+        runner.tick()
+        assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
+        assert state.get_status()["walk_seconds_left"] == 0.0
+
+    def test_status_reports_sitting_and_posture(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        runner.tick()
+        status = state.get_status()
+        assert status["sitting"] is False
+        assert status["posture"] == "standing"
+
+        state.submit_posture(True)
+        runner.tick()
+        status = state.get_status()
+        assert status["sitting"] is True
+        assert status["posture"] == "sitting"
+
+    def test_status_twist_is_zero_while_seated(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_posture(True)
+        runner.tick()
+
+        # The seated command block carries the posture flag in the vx slot, not a speed.
+        assert policy.command[0] == pytest.approx(1.0)
+        assert state.get_status()["twist"] == [0.0, 0.0, 0.0]
+
+    def test_standing_up_reports_rising_until_the_rise_is_over(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_posture(True)
+        runner.tick()
+
+        state.submit_posture(False)
+        runner.tick()
+        assert state.get_status()["posture"] == "rising"
+
+        _tick_seconds(runner, RISE_SECONDS)
+        assert state.get_status()["posture"] == "standing"
+
+    def test_reset_stands_the_robot_back_up(self):
+        state, policy = _pair(sit=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_posture(True)
+        runner.tick()
+
+        state.submit_reset()
+        runner.tick()
+        assert policy.sit_mode is False
+        assert state.get_status()["posture"] == "standing"
+
+
 def _post(url, body):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(), method="POST",
@@ -553,6 +718,27 @@ class TestBridgeServer:
         assert status == 200
         assert body == {"reset": True}
         assert state.drain() == [ResetCmd()]
+
+    def test_sit_and_stand_roundtrip(self):
+        with _served(FakePolicy(sit=True)) as (state, url):
+            assert _post(f"{url}/sit", {}) == (200, {"sit": True})
+            assert _post(f"{url}/stand", {}) == (200, {"sit": False})
+            assert state.drain() == [PostureCmd(True), PostureCmd(False)]
+
+    def test_sit_without_a_sit_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/sit", {})
+        assert excinfo.value.code == 400
+        assert state.drain() == []
+
+    def test_walk_while_seated_returns_400(self):
+        with _served(FakePolicy(sit=True)) as (state, url):
+            state.set_status({"sitting": True, "posture": "sitting"})
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                _post(f"{url}/walk", {"vx": 0.2})
+            assert excinfo.value.code == 400
+            assert state.drain() == []
 
     def test_look_roundtrip(self, served_state):
         state, url = served_state

@@ -1,9 +1,9 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
-The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / StopCmd / ResetCmd on a
-BridgeState. In infer_policy.py a SkillRunner applies them to PolicyInference.
-Here ViewerCommander applies them to the env's command terms instead, once per
-policy step, and publishes the status the bridge serves on /status.
+The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
+StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
+to PolicyInference. Here ViewerCommander applies them to the env's command terms
+instead, once per policy step, and publishes the status the bridge serves on /status.
 """
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ from dataclasses import dataclass, field
 
 from bridge.state import (
     GESTURE_KEYS,
+    RISE_SECONDS,
     BridgeState,
     GestureCmd,
     LookCmd,
+    PostureCmd,
     ResetCmd,
     StopCmd,
     WalkCmd,
@@ -28,6 +30,7 @@ HEAD_YAW = 2
 
 GESTURE_SECONDS = 1.6
 GESTURE_AMPLITUDE_RAD = 0.35
+
 FALLEN_GRAVITY_Z = -0.5  # projected gravity z above this means the trunk is over
 
 
@@ -49,6 +52,7 @@ class ViewerLimits:
     vel_max_ang: float = 1.0
     head_max: float = 1.4
     walking_session: bool = True  # truthy: a walking policy is loaded
+    sit_session: bool = False  # truthy: a sitstand policy is loaded
     gesture_player: _GestureKeys = field(default_factory=_GestureKeys)
 
 
@@ -70,6 +74,8 @@ class ViewerCommander:
         self._head = [0.0, 0.0, 0.0, 0.0]
         self._walk_until = 0.0
         self._gesture: _Gesture | None = None
+        self._posture = "standing"
+        self._rise_until = 0.0
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
@@ -84,29 +90,62 @@ class ViewerCommander:
         if self._time >= self._walk_until:
             self._twist = [0.0, 0.0, 0.0]
 
+        self._expire_rise()
+
         if self._watchdog.tick():
             self._release()
 
         self._write_tensors()
         self._publish_status()
 
+    def active_policy(self) -> str:
+        """Which loaded ONNX drives the robot right now."""
+        return "sit" if self._posture in ("sitting", "rising") else "walking"
+
     # Command handlers.
 
     def _apply(self, cmd) -> None:
         self._release_joystick()
         if isinstance(cmd, WalkCmd):
-            self._twist = [cmd.vx, cmd.vy, cmd.wz]
-            self._walk_until = self._time + cmd.seconds
+            self._walk(cmd)
         elif isinstance(cmd, LookCmd):
             self._gesture = None
             self._head = [0.0, cmd.pitch, cmd.yaw, 0.0]
         elif isinstance(cmd, GestureCmd):
             self._gesture = _Gesture(cmd.name, self._time)
+        elif isinstance(cmd, PostureCmd):
+            self._set_posture(cmd.sit)
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
             self._clear_commands()
+            self._posture = "standing"
             self._env.reset()
+
+    def _walk(self, cmd: WalkCmd) -> None:
+        """Start walking. A walk drained after a sit in the same tick is dropped."""
+        if self._posture != "standing":
+            return
+
+        self._twist = [cmd.vx, cmd.vy, cmd.wz]
+        self._walk_until = self._time + cmd.seconds
+
+    def _set_posture(self, sit: bool) -> None:
+        """Sit down at once, or start the rise glide back to standing."""
+        if sit:
+            self._posture = "sitting"
+            self._twist = [0.0, 0.0, 0.0]
+            self._walk_until = 0.0
+            return
+
+        if self._posture == "sitting":
+            self._posture = "rising"
+            self._rise_until = self._time + RISE_SECONDS
+
+    def _expire_rise(self) -> None:
+        """The rise glide is over: the robot is standing again."""
+        if self._posture == "rising" and self._time >= self._rise_until:
+            self._posture = "standing"
 
     def _release(self) -> None:
         """The brain went quiet: zero the twist and, unless a gesture is playing, the head."""
@@ -143,7 +182,7 @@ class ViewerCommander:
     def _write_tensors(self) -> None:
         manager = self._env.command_manager
         twist = manager.get_term("twist")
-        for i, value in enumerate(self._twist):
+        for i, value in enumerate(self._twist_command()):
             twist.vel_command_b[:, i] = value
 
         head = list(self._head)
@@ -154,6 +193,16 @@ class ViewerCommander:
         head_term = manager.get_term("head_pose")
         for i, value in enumerate(head):
             head_term._command[:, i] = value
+
+    def _twist_command(self) -> list[float]:
+        """Sitting writes the posture flag in the vx slot, rising writes the stand flag, zero."""
+        if self._posture == "sitting":
+            return [1.0, 0.0, 0.0]
+
+        if self._posture == "rising":
+            return [0.0, 0.0, 0.0]
+
+        return self._twist
 
     def _gesture_offset(self) -> tuple[int, float] | None:
         """Sine wave on head pitch (nod) or yaw (shake) for GESTURE_SECONDS."""
@@ -183,12 +232,14 @@ class ViewerCommander:
     def _publish_status(self) -> None:
         self._state.set_status({
             "ready": True,
-            "policy": "walking",
+            "policy": self.active_policy(),
             "twist": list(self._twist),
             "measured_twist": self._measured_twist(),
             "head": list(self._head),
             "walk_seconds_left": max(0.0, self._walk_until - self._time),
             "gesture": self._gesture.name if self._gesture else None,
+            "sitting": self._posture == "sitting",
+            "posture": self._posture,
             "fallen": self._is_fallen(),
             "actions": dict(self._actions),
         })
