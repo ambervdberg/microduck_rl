@@ -31,6 +31,8 @@ from bridge.watchdog import BrainWatchdog
 HEAD_PITCH = 1
 HEAD_YAW = 2
 
+BODY_POSE_SLOTS = 6
+
 GESTURE_SECONDS = 1.6
 GESTURE_AMPLITUDE_RAD = 0.35
 
@@ -237,6 +239,12 @@ class ViewerCommander:
         head_term = manager.get_term("head_pose")
         for i, value in enumerate(head):
             head_term._command[:, i] = value
+
+        # The play cfg samples a random body pose at reset and the term is pinned.
+        # Every policy here was trained on a zero or near zero body pose.
+        body_term = manager.get_term("body_pose")
+        for i in range(BODY_POSE_SLOTS):
+            body_term._command[:, i] = 0.0
 
     def _twist_command(self) -> list[float]:
         """Sitting writes the posture flag in the vx slot, rising writes the stand flag, zero."""

@@ -468,3 +468,11 @@ def test_status_reports_no_trick_while_walking():
     _env, state, commander = _setup(roll=True)
     commander.tick()
     assert state.get_status()["trick"] == NO_TRICK
+
+
+def test_body_pose_is_zeroed_every_tick():
+    env, _, commander = _setup()
+    body = env.command_manager.get_term("body_pose")
+    body._command[:] = 0.3
+    commander.tick()
+    assert body._command[0].tolist() == [0.0] * 6

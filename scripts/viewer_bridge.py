@@ -33,6 +33,7 @@ import mjlab_microduck.tasks  # noqa: F401  registers the tasks
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
 
 TASK = "Mjlab-Velocity-Flat-MicroDuck"
+LONG_EPISODE_S = 3600.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +48,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def keep_alive(cfg) -> None:
+    """Never respawn on a fall. A roll passes 177 deg and get up needs a fallen robot.
+
+    nan_state stays. time_out stays as a term, pushed so far out it never fires.
+    """
+    cfg.terminations.pop("fell_over", None)
+    cfg.terminations.pop("out_of_terrain_bounds", None)
+    cfg.episode_length_s = LONG_EPISODE_S
+
+
 def build_env(device: str, sitstand: bool = False) -> RslRlVecEnvWrapper:
     """One quiet env: no pushes, no obs noise, play config.
 
@@ -54,6 +65,7 @@ def build_env(device: str, sitstand: bool = False) -> RslRlVecEnvWrapper:
     """
     cfg = load_env_cfg(TASK, play=True)
     cfg.scene.num_envs = 1
+    keep_alive(cfg)
 
     # A robot on the ground falls through the walk model's floor, only the feet collide.
     if sitstand:
