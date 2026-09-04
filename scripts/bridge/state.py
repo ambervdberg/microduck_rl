@@ -25,6 +25,13 @@ BRAIN_TIMEOUT_S = 10.0
 # How long the stand up takes: the trained flag flip is about a 2 s glide.
 RISE_SECONDS = 2.5
 
+# How long each episodic trick runs before control goes back to walking.
+ROLL_SECONDS = 2.0
+GET_UP_SECONDS = 3.0
+
+# What /status reports while no trick is running.
+NO_TRICK = "none"
+
 _GESTURE_TABLE = default_gestures()
 
 # Short API name -> keyboard key that starts the gesture.
@@ -63,6 +70,33 @@ class PostureCmd:
 
 
 @dataclass(frozen=True)
+class TrickCmd:
+    """Run one episodic trick. The trick policy takes over until its timer ends."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class Trick:
+    """One trick: the policy that runs it, how long it takes, what /status calls it."""
+
+    session: str
+    behavior: str
+    seconds: float
+    status: str
+    flag: str
+
+
+# Trick name the API speaks -> everything the bridge needs to run and report it.
+TRICKS = {
+    "roll": Trick("roulade_session", "roulade", ROLL_SECONDS, "rolling", "--roulade"),
+    "get_up": Trick("standup_session", "standup", GET_UP_SECONDS, "getting_up", "--standup"),
+}
+
+TRICK_NAMES = tuple(TRICKS)
+
+
+@dataclass(frozen=True)
 class StopCmd:
     pass
 
@@ -84,6 +118,7 @@ ACTIONS = (
     ("pick up", "ground_pick_session"),
     ("kick", "kick_session"),
     ("roulade", "roulade_session"),
+    ("get up off the floor", "standup_session"),
 )
 
 
@@ -178,7 +213,8 @@ class BridgeState:
         """Clamp a walk to the policy envelope, then queue it and echo what will run."""
         self._note_request()
         self._require_walking_policy()
-        self._require_not_seated()
+        self._require_not_seated("sitting, stand up first")
+        self._require_no_trick()
 
         envelope = policy_envelope(self._policy)
         cvx = _clamp(vx, envelope.vx_min, envelope.vx_max)
@@ -226,9 +262,30 @@ class BridgeState:
         self._require_sit_policy()
 
         sit = bool(sit)
+
+        if sit:
+            self._require_no_trick()
+
         self._enqueue(PostureCmd(sit))
 
         return {"sit": sit}
+
+    def submit_trick(self, name) -> dict:
+        """Queue one episodic trick. The robot must be standing and free."""
+        self._note_request()
+
+        trick = TRICKS.get(name)
+
+        if trick is None:
+            raise ValueError(f"unknown trick {name!r}, expected one of {TRICK_NAMES}")
+
+        self._require_trick_policy(name, trick)
+        self._require_not_seated(self._seated_message(name))
+        self._require_no_trick()
+
+        self._enqueue(TrickCmd(name))
+
+        return {"trick": name}
 
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""
@@ -293,13 +350,38 @@ class BridgeState:
         if not getattr(self._policy, "sit_session", None):
             raise ValueError("no sit policy loaded, start the runner with --sitstand")
 
-    def _require_not_seated(self) -> None:
-        """Reject walks while the robot is seated, still getting up, or a sit is queued."""
+    def _require_trick_policy(self, name: str, trick: Trick) -> None:
+        """Reject a trick no loaded policy can run."""
+        if not getattr(self._policy, trick.session, None):
+            raise ValueError(f"no {name} policy loaded, start the runner with {trick.flag}")
+
+    @staticmethod
+    def _seated_message(name: str) -> str:
+        """Why a seated robot cannot run this trick. Get up is the wrong tool for a sit."""
+        if name == "get_up":
+            return "sitting, use stand up"
+
+        return "sitting, stand up first"
+
+    def _require_not_seated(self, message: str) -> None:
+        """Reject a command while the robot is seated, still getting up, or a sit is queued."""
         status = self.peek_status()
         seated = status.get("sitting") or status.get("posture") == "rising"
 
         if seated or self._sit_queued():
-            raise ValueError("sitting, stand up first")
+            raise ValueError(message)
+
+    def _require_no_trick(self) -> None:
+        """Reject a command while a trick is running or still waiting to start."""
+        running = self.peek_status().get("trick", NO_TRICK) != NO_TRICK
+
+        if running or self._trick_queued():
+            raise ValueError("a trick is running, wait for it")
+
+    def _trick_queued(self) -> bool:
+        """True when a trick is still waiting to be drained."""
+        with self._lock:
+            return any(isinstance(cmd, TrickCmd) for cmd in self._pending)
 
     def _sit_queued(self) -> bool:
         """True when the last posture command still waiting to be drained is a sit."""

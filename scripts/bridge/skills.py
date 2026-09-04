@@ -8,19 +8,27 @@ indices: head_offset[1] is head_pitch, head_offset[2] is head_yaw.
 from bridge.state import (
     GESTURE_KEYS,
     GESTURE_SHORT_NAMES,
+    NO_TRICK,
     RISE_SECONDS,
+    TRICKS,
     BridgeState,
     GestureCmd,
     LookCmd,
     PostureCmd,
     ResetCmd,
     StopCmd,
+    TrickCmd,
     WalkCmd,
     available_actions,
 )
 from bridge.watchdog import BrainWatchdog
 
 FALLEN_GRAVITY_Z = -0.5  # projected gravity z is near -1 upright, near 0 on the ground
+
+
+def _count_down(seconds_left: float, control_dt: float) -> float:
+    """Take one control step off a sim-time timer, floored at zero."""
+    return max(0.0, seconds_left - control_dt)
 
 
 class SkillRunner:
@@ -32,6 +40,8 @@ class SkillRunner:
         self._control_dt = float(control_dt)
         self._walk_seconds_left = 0.0
         self._rise_seconds_left = 0.0
+        self._trick_seconds_left = 0.0
+        self._trick_name = NO_TRICK
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(policy)
 
@@ -43,6 +53,7 @@ class SkillRunner:
             LookCmd: self._look,
             GestureCmd: self._gesture,
             PostureCmd: self._posture,
+            TrickCmd: self._trick,
         }
 
     def tick(self, policy_enabled: bool = True) -> None:
@@ -58,6 +69,7 @@ class SkillRunner:
         if policy_enabled:
             self._expire_walk()
             self._expire_rise()
+            self._expire_trick()
 
             if self._watchdog.tick():
                 self._release()
@@ -85,6 +97,7 @@ class SkillRunner:
         """Stop everything and stand back up. PolicyInference has no sim to respawn."""
         self._stop(cmd)
         self._rise_seconds_left = 0.0
+        self._clear_trick()
 
         if self._policy.sit_mode:
             self._policy.toggle_sit()
@@ -111,6 +124,19 @@ class SkillRunner:
         self._policy.toggle_sit()
         self._rise_seconds_left = 0.0 if cmd.sit else RISE_SECONDS
 
+    def _trick(self, cmd: TrickCmd) -> None:
+        """Hand the robot to a trick policy and arm the countdown that ends it."""
+        trick = TRICKS[cmd.name]
+
+        self._stop_walking()
+        self._policy.trigger_behavior(trick.behavior)
+        self._trick_name = trick.status
+        self._trick_seconds_left = trick.seconds
+
+    def trick_name(self) -> str:
+        """The running trick under the name /status speaks, or "none"."""
+        return self._trick_name
+
     def _is_fallen(self) -> bool:
         """True when the trunk is no longer upright, NaN gravity included."""
         gravity_z = float(self._policy.get_projected_gravity()[2])
@@ -123,7 +149,7 @@ class SkillRunner:
         if self._walk_seconds_left <= 0.0:
             return
 
-        self._walk_seconds_left = max(0.0, self._walk_seconds_left - self._control_dt)
+        self._walk_seconds_left = _count_down(self._walk_seconds_left, self._control_dt)
 
         if self._walk_seconds_left <= 0.0:
             self._stop_walking()
@@ -131,7 +157,22 @@ class SkillRunner:
     def _expire_rise(self) -> None:
         """Count the stand up down by one control step. At zero the robot is standing."""
         if self._rise_seconds_left > 0.0:
-            self._rise_seconds_left = max(0.0, self._rise_seconds_left - self._control_dt)
+            self._rise_seconds_left = _count_down(self._rise_seconds_left, self._control_dt)
+
+    def _expire_trick(self) -> None:
+        """Count the trick down by one control step and clear it at zero."""
+        if self._trick_seconds_left <= 0.0:
+            return
+
+        self._trick_seconds_left = _count_down(self._trick_seconds_left, self._control_dt)
+
+        if self._trick_seconds_left <= 0.0:
+            self._clear_trick()
+
+    def _clear_trick(self) -> None:
+        """Drop the trick timer and report no trick again."""
+        self._trick_seconds_left = 0.0
+        self._trick_name = NO_TRICK
 
     def _release(self) -> None:
         """Zero the twist and, unless a gesture is playing, the head pose."""
@@ -160,6 +201,7 @@ class SkillRunner:
             "gesture": self._active_gesture(),
             "sitting": bool(self._policy.sit_mode),
             "posture": self._posture_name(),
+            "trick": self._trick_name,
             "fallen": fallen,
             "actions": dict(self._actions),
         })

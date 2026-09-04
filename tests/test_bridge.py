@@ -18,9 +18,11 @@ from gestures import default_gestures  # noqa: E402
 
 from bridge.state import (  # noqa: E402
     BRAIN_TIMEOUT_S,
+    GET_UP_SECONDS,
     HEAD_PITCH_MAX,
     HEAD_YAW_MAX,
     RISE_SECONDS,
+    ROLL_SECONDS,
     WALK_DEFAULT_S,
     WALK_MAX_S,
     BridgeState,
@@ -29,6 +31,7 @@ from bridge.state import (  # noqa: E402
     PostureCmd,
     ResetCmd,
     StopCmd,
+    TrickCmd,
     WalkCmd,
     available_actions,
 )
@@ -70,7 +73,15 @@ class FakeGesturePlayer:
 class FakePolicy:
     """Mimics the PolicyInference surface the bridge touches."""
 
-    def __init__(self, gravity_z: float = -1.0, walking: bool = True, gestures=None, sit: bool = False):
+    def __init__(
+        self,
+        gravity_z: float = -1.0,
+        walking: bool = True,
+        gestures=None,
+        sit: bool = False,
+        roll: bool = False,
+        get_up: bool = False,
+    ):
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.head_offset = np.zeros(4, dtype=np.float32)
         self.command = np.zeros(13, dtype=np.float32)
@@ -81,6 +92,9 @@ class FakePolicy:
         self.gravity_z = gravity_z
         self.walking_session = object() if walking else None
         self.sit_session = object() if sit else None
+        self.roulade_session = object() if roll else None
+        self.standup_session = object() if get_up else None
+        self.behaviors = []
         self.sit_mode = False
         self.sit_toggles = 0
         self.switch_threshold = 0.05
@@ -116,6 +130,13 @@ class FakePolicy:
         self.sit_toggles += 1
         self.sit_mode = not self.sit_mode
         self.current_policy = "sit" if self.sit_mode else "walking"
+        self._update_command()
+
+    def trigger_behavior(self, name):
+        """Mimics PolicyInference.trigger_behavior: a session swap with a zero command."""
+        self.behaviors.append(name)
+        self.vel_cmd = np.zeros(3, dtype=np.float32)
+        self.current_policy = name
         self._update_command()
 
     def start_gesture(self, key):
@@ -320,6 +341,95 @@ class TestPostureState:
         state, _ = _pair(sit=True)
         before = state.request_count()
         state.submit_posture(True)
+        assert state.request_count() == before + 1
+
+
+class TestTrickState:
+    def test_roll_and_get_up_are_queued(self):
+        state, _ = _pair(roll=True, get_up=True)
+        assert state.submit_trick("roll") == {"trick": "roll"}
+        assert state.drain() == [TrickCmd("roll")]
+
+        assert state.submit_trick("get_up") == {"trick": "get_up"}
+        assert state.drain() == [TrickCmd("get_up")]
+
+    def test_unknown_trick_is_rejected(self):
+        state, _ = _pair(roll=True)
+        with pytest.raises(ValueError, match="unknown trick"):
+            state.submit_trick("backflip")
+        assert state.drain() == []
+
+    def test_roll_without_a_roll_policy_is_rejected(self):
+        state, _ = _pair(get_up=True)
+        with pytest.raises(ValueError, match="no roll policy loaded"):
+            state.submit_trick("roll")
+        assert state.drain() == []
+
+    def test_get_up_without_a_get_up_policy_is_rejected(self):
+        state, _ = _pair(roll=True)
+        with pytest.raises(ValueError, match="no get_up policy loaded"):
+            state.submit_trick("get_up")
+        assert state.drain() == []
+
+    def test_roll_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, roll=True)
+        state.set_status({"sitting": True, "posture": "sitting"})
+        with pytest.raises(ValueError, match="stand up first"):
+            state.submit_trick("roll")
+        assert state.drain() == []
+
+    def test_roll_while_rising_is_rejected(self):
+        state, _ = _pair(sit=True, roll=True)
+        state.set_status({"sitting": False, "posture": "rising"})
+        with pytest.raises(ValueError, match="stand up first"):
+            state.submit_trick("roll")
+        assert state.drain() == []
+
+    def test_get_up_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, get_up=True)
+        state.set_status({"sitting": True, "posture": "sitting"})
+        with pytest.raises(ValueError, match="use stand up"):
+            state.submit_trick("get_up")
+        assert state.drain() == []
+
+    def test_trick_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(roll=True, get_up=True)
+        state.set_status({"trick": "rolling"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_trick("get_up")
+        assert state.drain() == []
+
+    def test_trick_while_a_trick_is_still_queued_is_rejected(self):
+        state, _ = _pair(roll=True, get_up=True)
+        state.submit_trick("roll")
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_trick("get_up")
+        assert state.drain() == [TrickCmd("roll")]
+
+    def test_walk_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(roll=True)
+        state.set_status({"trick": "rolling"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == []
+
+    def test_sit_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(sit=True, roll=True)
+        state.set_status({"trick": "rolling"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_posture(True)
+        assert state.drain() == []
+
+    def test_walk_is_allowed_again_once_the_trick_is_over(self):
+        state, _ = _pair(roll=True)
+        state.set_status({"trick": "none"})
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+        assert state.drain() == [WalkCmd(0.2, 0.0, 0.0, 2.0)]
+
+    def test_trick_counts_as_a_brain_request(self):
+        state, _ = _pair(roll=True)
+        before = state.request_count()
+        state.submit_trick("roll")
         assert state.request_count() == before + 1
 
 
@@ -652,6 +762,83 @@ class TestSkillsPosture:
         assert state.get_status()["posture"] == "standing"
 
 
+class TestSkillsTrick:
+    def test_roll_starts_the_behavior_and_reports_rolling(self):
+        state, policy = _pair(roll=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_trick("roll")
+        runner.tick()
+        assert policy.behaviors == ["roulade"]
+        assert state.get_status()["trick"] == "rolling"
+
+    def test_get_up_starts_the_behavior_and_reports_getting_up(self):
+        state, policy = _pair(get_up=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_trick("get_up")
+        runner.tick()
+        assert policy.behaviors == ["standup"]
+        assert state.get_status()["trick"] == "getting_up"
+
+    def test_trick_returns_to_none_when_the_timer_ends(self):
+        state, policy = _pair(roll=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_trick("roll")
+        runner.tick()
+
+        _tick_seconds(runner, ROLL_SECONDS - 0.1)
+        assert state.get_status()["trick"] == "rolling"
+
+        _tick_seconds(runner, 0.2)
+        assert state.get_status()["trick"] == "none"
+        assert runner.trick_name() == "none"
+
+    def test_get_up_runs_for_its_own_duration(self):
+        state, policy = _pair(get_up=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_trick("get_up")
+        runner.tick()
+
+        _tick_seconds(runner, ROLL_SECONDS + 0.1)
+        assert state.get_status()["trick"] == "getting_up"
+
+        _tick_seconds(runner, GET_UP_SECONDS)
+        assert state.get_status()["trick"] == "none"
+
+    def test_rolling_cancels_a_running_walk(self):
+        state, policy = _pair(roll=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_walk(0.2, 0.0, 0.0, 5.0)
+        runner.tick()
+        state.submit_trick("roll")
+        runner.tick()
+        assert policy.vel_cmd.tolist() == [0.0, 0.0, 0.0]
+        assert state.get_status()["walk_seconds_left"] == 0.0
+
+    def test_reset_clears_a_running_trick(self):
+        state, policy = _pair(roll=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_trick("roll")
+        runner.tick()
+
+        state.submit_reset()
+        runner.tick()
+        assert state.get_status()["trick"] == "none"
+
+    def test_status_reports_no_trick_by_default(self):
+        state, policy = _pair()
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        runner.tick()
+        assert state.get_status()["trick"] == "none"
+
+    def test_paused_tick_holds_the_trick_countdown(self):
+        state, policy = _pair(roll=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_trick("roll")
+        runner.tick(policy_enabled=False)
+        _tick_seconds(runner, ROLL_SECONDS + 1.0, policy_enabled=False)
+        assert state.get_status()["trick"] == "rolling"
+
+
 def _post(url, body):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(), method="POST",
@@ -724,6 +911,21 @@ class TestBridgeServer:
             assert _post(f"{url}/sit", {}) == (200, {"sit": True})
             assert _post(f"{url}/stand", {}) == (200, {"sit": False})
             assert state.drain() == [PostureCmd(True), PostureCmd(False)]
+
+    def test_roll_and_get_up_roundtrip(self):
+        with _served(FakePolicy(roll=True, get_up=True)) as (state, url):
+            assert _post(f"{url}/roll", {}) == (200, {"trick": "roll"})
+            assert state.drain() == [TrickCmd("roll")]
+            assert _post(f"{url}/get_up", {}) == (200, {"trick": "get_up"})
+            assert state.drain() == [TrickCmd("get_up")]
+
+    def test_roll_without_a_roll_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/roll", {})
+        assert excinfo.value.code == 400
+        assert "error" in json.loads(excinfo.value.read())
+        assert state.drain() == []
 
     def test_sit_without_a_sit_policy_returns_400(self, served_state):
         state, url = served_state
