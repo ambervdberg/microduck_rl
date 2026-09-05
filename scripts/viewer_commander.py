@@ -181,6 +181,7 @@ class ViewerCommander:
         elif isinstance(cmd, BallCmd):
             self._place_ball(cmd.foot)
         elif isinstance(cmd, FollowBallCmd):
+            self._stop_face()
             self._start_follow()
         elif isinstance(cmd, FaceBallCmd):
             self._start_face()
@@ -263,6 +264,7 @@ class ViewerCommander:
         self._gesture = None
         self._walk_until = 0.0
         self._stop_follow()
+        self._lost = False
 
     # Ball.
 
@@ -300,7 +302,7 @@ class ViewerCommander:
     def _follow_tick(self) -> None:
         """Every PICTURE_EVERY ticks: read the picture, find the ball, move the head toward it."""
         if not self._following or self._is_fallen():
-            self._turn = 0.0
+            self._stop_face()
             return
 
         self._ticks_since_picture += 1
@@ -337,6 +339,7 @@ class ViewerCommander:
 
     def _start_face(self) -> None:
         """Follow with the head and turn the body until the head is straight, from any head yaw."""
+        self._stop_face()
         self._start_follow()
         self._turner = BodyTurner(float(self._state.policy().vel_max_ang))
         self._turner.engage()
@@ -355,6 +358,7 @@ class ViewerCommander:
             return
 
         if self._follower.searching:
+            # Clears the turner latch. The hunt drives the body while the ball is out of view.
             self._turner.update(bearing, searching=True)
             self._turn = self._hunt_tick(bearing)
             return

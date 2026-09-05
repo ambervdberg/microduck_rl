@@ -11,7 +11,6 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from bridge.follower import (
-    FACE_GAIN,
     FACE_START,
     FACE_STOP,
     FACE_TURN_MIN,
@@ -888,7 +887,7 @@ def test_face_ball_is_offered_only_with_a_camera():
 
 
 def test_facing_starts_the_follow_too():
-    _env, state, commander = _facing_setup()
+    _env, state, _commander = _facing_setup()
     status = state.get_status()
     assert status["facing"] is True
     assert status["following"] is True
@@ -929,6 +928,18 @@ def test_a_chat_walk_ends_the_face_and_keeps_the_follow():
     assert _twist(env) == pytest.approx([0.2, 0.0, 0.0])
 
 
+def test_a_follow_during_a_face_ends_the_turn_and_keeps_following():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    state.submit_follow_ball()
+    commander.tick()
+    status = state.get_status()
+    assert status["facing"] is False
+    assert status["following"] is True
+    assert status["turning"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
 def test_stop_ends_the_face():
     env, state, commander = _facing_setup(col=156, row=60)
     _turn_head_past_start(commander)
@@ -945,12 +956,16 @@ def test_a_trick_ends_the_face():
     assert state.get_status()["facing"] is False
 
 
-def test_a_fall_pauses_the_turn():
-    env, _state, commander = _facing_setup(col=156, row=60)
+def test_a_fall_ends_the_face():
+    env, state, commander = _facing_setup(col=156, row=60)
     _turn_head_past_start(commander)
     env.scene["robot"] = _FallenRobot()
     commander.tick()
     assert _twist(env) == [0.0, 0.0, 0.0]
+    status = state.get_status()
+    assert status["facing"] is False
+    assert status["turning"] is False
+    assert status["following"] is True
 
 
 def test_the_watchdog_ends_the_face_and_keeps_the_follow():
@@ -1058,6 +1073,16 @@ def test_a_new_face_clears_lost():
     status = state.get_status()
     assert status["lost"] is False
     assert status["facing"] is True
+
+
+def test_stop_clears_lost():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    state.submit_stop()
+    commander.tick()
+    assert state.get_status()["lost"] is False
 
 
 def test_a_plain_follow_never_hunts():
