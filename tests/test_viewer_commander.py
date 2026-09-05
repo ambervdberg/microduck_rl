@@ -10,7 +10,16 @@ import torch
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from bridge.follower import FACE_GAIN, FACE_START, FACE_STOP, HUNT_RATE, LOST_AFTER_S, SEARCH_PITCH, TAN_HALF_WIDTH
+from bridge.follower import (
+    FACE_GAIN,
+    FACE_START,
+    FACE_STOP,
+    FACE_TURN_MIN,
+    HUNT_RATE,
+    LOST_AFTER_S,
+    SEARCH_PITCH,
+    TAN_HALF_WIDTH,
+)
 from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
@@ -1020,7 +1029,7 @@ def test_a_sighting_during_the_hunt_hands_back_to_the_turner():
     yaw = _head(env)[HEAD_YAW]
     bearing = _bearing_at(36, yaw)
     assert FACE_STOP < abs(bearing) < FACE_START
-    assert _twist(env)[2] == pytest.approx(FACE_GAIN * bearing)
+    assert _twist(env)[2] == pytest.approx(math.copysign(FACE_TURN_MIN, bearing))
     assert state.get_status()["lost"] is False
 
 
@@ -1078,4 +1087,4 @@ def test_the_handover_from_the_hunt_closes_the_last_bit():
     yaw = _head(env)[HEAD_YAW]
     bearing = _bearing_at(60, yaw)
     assert FACE_STOP < abs(bearing) < FACE_START
-    assert _twist(env)[2] == pytest.approx(FACE_GAIN * bearing)
+    assert _twist(env)[2] == pytest.approx(math.copysign(FACE_TURN_MIN, bearing))

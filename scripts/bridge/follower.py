@@ -23,6 +23,7 @@ SEARCH_RATE = 1.0     # rad/s of sweep
 FACE_START = 0.3      # rad of ball bearing that starts a body turn
 FACE_STOP = 0.1       # rad of ball bearing that ends it, the gap stops flip-flopping
 FACE_GAIN = 1.0       # rad/s of body turn per rad of ball bearing
+FACE_TURN_MIN = 0.3   # rad/s, the smallest turn the walk policy actually makes
 
 HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
 HUNT_FULL_TURN = 2 * math.pi  # rad of body turn without a sighting, then the hunt gives up
@@ -127,7 +128,9 @@ class BodyTurner:
         self._turning = True
 
     def update(self, bearing: float, searching: bool) -> float:
-        """Turn rate in rad/s. Zero while searching, or while the ball is near straight ahead."""
+        """Turn rate in rad/s. Zero while searching, or while the ball is near straight ahead.
+        While turning the rate is at least FACE_TURN_MIN, so the walker moves.
+        """
         if searching:
             self._turning = False
             return 0.0
@@ -140,7 +143,9 @@ class BodyTurner:
         if not self._turning:
             return 0.0
 
-        return max(-self._turn_max, min(self._turn_max, FACE_GAIN * bearing))
+        rate = math.copysign(max(abs(FACE_GAIN * bearing), FACE_TURN_MIN), bearing)
+
+        return max(-self._turn_max, min(self._turn_max, rate))
 
 
 class BallHunt:

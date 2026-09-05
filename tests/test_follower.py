@@ -14,6 +14,7 @@ from bridge.follower import (
     FACE_GAIN,
     FACE_START,
     FACE_STOP,
+    FACE_TURN_MIN,
     GAIN,
     HUNT_RATE,
     LOST_AFTER_S,
@@ -164,7 +165,7 @@ def test_the_turn_stays_under_the_cap():
 def test_the_turn_keeps_going_between_start_and_stop():
     turner = BodyTurner(TURN_MAX)
     turner.update(FACE_START + 0.05, searching=False)
-    assert turner.update(0.2, searching=False) == pytest.approx(FACE_GAIN * 0.2)
+    assert turner.update(0.2, searching=False) == pytest.approx(FACE_TURN_MIN)
     assert turner.turning is True
 
 
@@ -230,7 +231,7 @@ def test_turning_the_wrong_way_counts_down():
 def test_engage_turns_from_between_stop_and_start():
     turner = BodyTurner(TURN_MAX)
     turner.engage()
-    assert turner.update(0.2, searching=False) == pytest.approx(FACE_GAIN * 0.2)
+    assert turner.update(0.2, searching=False) == pytest.approx(FACE_TURN_MIN)
     assert turner.turning is True
 
 
@@ -255,3 +256,20 @@ def test_a_ball_at_the_right_edge_bears_a_half_width_to_the_right():
 
 def test_the_half_width_matches_the_head_camera():
     assert math.degrees(math.atan(TAN_HALF_WIDTH)) == pytest.approx(45.65, abs=0.05)
+
+
+def test_a_small_bearing_still_gets_the_minimum_turn():
+    turner = BodyTurner(TURN_MAX)
+    turner.engage()
+    assert turner.update(-0.15, searching=False) == pytest.approx(-FACE_TURN_MIN)
+
+
+def test_a_large_bearing_is_above_the_minimum():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(0.5, searching=False) == pytest.approx(FACE_GAIN * 0.5)
+
+
+def test_the_minimum_turn_is_inside_the_cap():
+    turner = BodyTurner(0.2)
+    turner.engage()
+    assert turner.update(0.2, searching=False) == 0.2
