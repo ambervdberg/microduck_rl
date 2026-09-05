@@ -82,8 +82,8 @@ GROUND_PICK_SECONDS = 4.0
 # Extra wait on top of the trick seconds. Sim time in the viewer runs slower than wall time.
 TRICK_WAIT_MARGIN_S = 4.0
 
-# Wait cap for a face: a half turn at the capped rate plus the slow viewer.
-FACE_MAX_WAIT_S = 8.0
+# Wait cap for a face: a full hunt circle at HUNT_RATE plus the turn, in slow viewer time.
+FACE_MAX_WAIT_S = 25.0
 
 # What /status reports while no trick is running.
 NO_TRICK = "none"
@@ -330,10 +330,22 @@ def face_ball() -> str:
     """Turn on the spot until the ball is straight ahead. Returns once the body stops turning.
 
     Starts follow_ball too, so the head keeps the ball in view afterwards. The
-    robot must be standing and free. While the ball is out of view only the
-    head searches, the body waits.
+    robot must be standing and free. While the ball is out of view the body
+    turns a full circle to look for it. If the reply has lost true, the ball
+    was not found anywhere and the robot stopped, tell the user so.
     """
-    return _post_and_watch("/face_ball", "turning", False, FACE_MAX_WAIT_S)
+    return _with_lost(_post_and_watch("/face_ball", "turning", False, FACE_MAX_WAIT_S))
+
+
+def _with_lost(reply: str) -> str:
+    """Add the bridge's lost flag to a face reply. Errors pass through."""
+    echo = json.loads(reply)
+    if "error" in echo:
+        return reply
+
+    echo["lost"] = bool(json.loads(_get("/status")).get("lost", False))
+
+    return json.dumps(echo)
 
 
 @tool

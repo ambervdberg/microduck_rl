@@ -543,28 +543,46 @@ def _turning():
 
 
 def _faced():
-    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": False}
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": False,
+            "lost": False}
+
+
+def _lost():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": False,
+            "lost": True}
 
 
 def test_face_ball_posts_and_waits_until_the_body_stops_turning(monkeypatch):
     received, server = _scripted_bridge(monkeypatch, [_turning(), _turning(), _faced()])
     try:
-        tools.face_ball.invoke({})
+        result = tools.face_ball.invoke({})
     finally:
         server.shutdown()
 
-    assert [r[1] for r in received] == ["/face_ball", "/status", "/status", "/status"]
+    assert [r[1] for r in received] == ["/face_ball", "/status", "/status", "/status", "/status"]
     assert _commands(received) == [("POST", "/face_ball", {})]
+    assert json.loads(result)["lost"] is False
 
 
 def test_face_ball_wait_gives_up_after_its_cap(monkeypatch):
+    monkeypatch.setattr(tools, "FACE_MAX_WAIT_S", 1.0)
     received, server = _scripted_bridge(monkeypatch, [_turning()])
     try:
         tools.face_ball.invoke({})
     finally:
         server.shutdown()
 
-    assert len(_polls(received)) == int(tools.FACE_MAX_WAIT_S / tools.IDLE_POLL_S)
+    assert len(_polls(received)) == 1 + int(tools.FACE_MAX_WAIT_S / tools.IDLE_POLL_S)
+
+
+def test_face_ball_reports_a_lost_ball(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_turning(), _lost()])
+    try:
+        result = json.loads(tools.face_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["lost"] is True
 
 
 def test_face_ball_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
