@@ -545,6 +545,34 @@ class TestBallState:
         assert state.request_count() == before + 1
 
 
+class TestGroundPickState:
+    def test_ground_pick_is_queued(self):
+        state, _ = _pair(ground_pick=True)
+        assert state.submit_ground_pick() == {"trick": "ground_pick"}
+        assert state.drain() == [TrickCmd("ground_pick")]
+
+    def test_ground_pick_without_its_policy_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError, match="no ground_pick policy loaded, start the runner with --ground-pick"):
+            state.submit_ground_pick()
+
+    def test_ground_pick_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, ground_pick=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_ground_pick()
+
+    def test_ground_pick_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(ground_pick=True)
+        state.set_status({"trick": "kicking"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_ground_pick()
+
+    def test_ground_pick_timer_and_status_name(self):
+        assert TRICKS["ground_pick"].seconds == GROUND_PICK_SECONDS
+        assert TRICKS["ground_pick"].status == "picking"
+
+
 class TestAvailableActions:
     def test_walking_policy_offers_walk_look_and_both_gestures(self):
         actions = available_actions(FakePolicy())
@@ -1170,3 +1198,15 @@ class TestBridgeServer:
                 _post(f"{url}/kick", {"foot": "middle"})
             assert excinfo.value.code == 400
             assert state.drain() == []
+
+    def test_ground_pick_roundtrip(self):
+        with _served(FakePolicy(ground_pick=True)) as (state, url):
+            assert _post(f"{url}/ground_pick", {}) == (200, {"trick": "ground_pick"})
+            assert state.drain() == [TrickCmd("ground_pick")]
+
+    def test_ground_pick_without_its_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/ground_pick", {})
+        assert excinfo.value.code == 400
+        assert state.drain() == []

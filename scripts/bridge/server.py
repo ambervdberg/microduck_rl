@@ -16,6 +16,7 @@ Routes:
     POST /get_up    get up off the floor, no body
     POST /kick      {"foot": "right" | "left"}, kick with that foot, right by default
     POST /ball      {"foot": "right" | "left"}, new ball in front of that foot
+    POST /ground_pick   beak to the floor and back up, no body
     POST /stop      zero twist, head and gesture
     POST /reset     stop, and respawn the robot where the sim supports it
 """
@@ -77,6 +78,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         "/get_up": "_get_up",
         "/kick": "_kick",
         "/ball": "_ball",
+        "/ground_pick": "_ground_pick",
         "/reset": "_reset",
     }
 
@@ -198,6 +200,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # Put a new ball in front of one foot, right by default.
     def _ball(self, body: dict) -> dict:
         return self._state.submit_ball(body.get("foot", "right"))
+
+    # One ground pick cycle. Nothing is grabbed, the sim has no mouth.
+    def _ground_pick(self, _body: dict) -> dict:
+        return self._state.submit_ground_pick()
 
     # Zero everything now.
     def _stop(self, _body: dict) -> dict:

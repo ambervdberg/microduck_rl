@@ -327,6 +327,10 @@ class BridgeState:
 
         return {"ball": foot}
 
+    def submit_ground_pick(self) -> dict:
+        """Queue one ground pick: beak to the floor and back up, one 4 s cycle."""
+        return self.submit_trick("ground_pick")
+
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""
         self._note_request()
