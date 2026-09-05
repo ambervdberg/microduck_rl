@@ -205,6 +205,7 @@ def _post_and_wait_for(path: str, field: str, targets: tuple, max_wait_s: float)
 
     A bridge error returns at once. A wait that runs out returns the last value seen.
     The reply also carries lost and at_ball from the last status read.
+    A "none" before the walk has started is the old status and is skipped.
     """
     reply = _post(path, {})
     echo = json.loads(reply)
@@ -216,6 +217,7 @@ def _post_and_wait_for(path: str, field: str, targets: tuple, max_wait_s: float)
     deadline = time.monotonic() + max_wait_s
     value = None
     status = {}
+    started = False
 
     while time.monotonic() < deadline:
         status = _poll_status()
@@ -225,7 +227,10 @@ def _post_and_wait_for(path: str, field: str, targets: tuple, max_wait_s: float)
 
         value = status.get(field)
 
-        if value in targets:
+        if value != "none":
+            started = True
+
+        if value in targets and (value != "none" or started):
             break
 
     return json.dumps({field: value, "lost": bool(status.get("lost", False)),

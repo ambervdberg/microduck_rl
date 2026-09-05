@@ -34,6 +34,7 @@ If face_ball comes back with lost true, say that the ball could not be found.
 If face_ball comes back with turning true, the turn did not finish in time, say so.
 go_to_ball walks up to the ball and stops in front of it, then a kick reaches
 it. It says arrived or gave_up, and lost when the ball was nowhere.
+An approach of none means the walk ended for another reason, look at lost.
 Answer briefly after acting."""
 
 

@@ -632,6 +632,19 @@ def test_go_to_ball_posts_and_waits_until_arrived(monkeypatch):
     assert result["at_ball"] is True
 
 
+def test_go_to_ball_skips_the_stale_none_before_the_walk_starts(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("none"), _approaching("walking"),
+                                                       _approaching("arrived", at_ball=True)])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["approach"] == "arrived"
+    assert result["at_ball"] is True
+    assert len(_polls(received)) == 3
+
+
 def test_go_to_ball_reports_giving_up(monkeypatch):
     received, server = _scripted_bridge(monkeypatch, [_approaching("gave_up")])
     try:
