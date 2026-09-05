@@ -612,3 +612,59 @@ def test_face_ball_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
 
 def test_face_ball_is_a_registered_tool():
     assert "face_ball" in [t.name for t in tools.ALL_TOOLS]
+
+
+def _approaching(state, at_ball=False):
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "approach": state,
+            "lost": False, "at_ball": at_ball}
+
+
+def test_go_to_ball_posts_and_waits_until_arrived(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("walking"), _approaching("walking"),
+                                                       _approaching("arrived", at_ball=True)])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/go_to_ball", "/status", "/status", "/status"]
+    assert result["approach"] == "arrived"
+    assert result["at_ball"] is True
+
+
+def test_go_to_ball_reports_giving_up(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("gave_up")])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["approach"] == "gave_up"
+
+
+def test_go_to_ball_wait_gives_up_after_its_cap(monkeypatch):
+    monkeypatch.setattr(tools, "GO_TO_BALL_MAX_WAIT_S", 1.0)
+    received, server = _scripted_bridge(monkeypatch, [_approaching("walking")])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert len(_polls(received)) == int(tools.GO_TO_BALL_MAX_WAIT_S / tools.IDLE_POLL_S)
+    assert result["approach"] == "walking"
+
+
+def test_go_to_ball_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("none")])
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "fallen, get up first"}))
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert "error" in result
+    assert _polls(received) == []
+
+
+def test_go_to_ball_is_a_registered_tool():
+    assert "go_to_ball" in [t.name for t in tools.ALL_TOOLS]

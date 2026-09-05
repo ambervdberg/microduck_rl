@@ -85,6 +85,12 @@ TRICK_WAIT_MARGIN_S = 4.0
 # Wait cap for a face: a full hunt circle at HUNT_RATE plus the turn, in slow viewer time.
 FACE_MAX_WAIT_S = 25.0
 
+# Wait cap for a walk to the ball: the bridge gives up at 20 s of sim time, the viewer runs slower.
+GO_TO_BALL_MAX_WAIT_S = 30.0
+
+# Approach values that mean the walk to the ball is over.
+APPROACH_OVER = ("arrived", "gave_up", "none")
+
 # What /status reports while no trick is running.
 NO_TRICK = "none"
 
@@ -192,6 +198,38 @@ def _post_and_watch(path: str, field: str, target: str | bool, max_wait_s: float
         time.sleep(settle_s)
 
     return reply
+
+
+def _post_and_wait_for(path: str, field: str, targets: tuple, max_wait_s: float) -> str:
+    """POST a command, wait for a status field to reach one of the targets, return that field.
+
+    A bridge error returns at once. A wait that runs out returns the last value seen.
+    The reply also carries lost and at_ball from the last status read.
+    """
+    reply = _post(path, {})
+    echo = json.loads(reply)
+
+    if "error" in echo:
+        return reply
+
+    time.sleep(START_WAIT_S)
+    deadline = time.monotonic() + max_wait_s
+    value = None
+    status = {}
+
+    while time.monotonic() < deadline:
+        status = _poll_status()
+
+        if "error" in status:
+            return json.dumps(status)
+
+        value = status.get(field)
+
+        if value in targets:
+            break
+
+    return json.dumps({field: value, "lost": bool(status.get("lost", False)),
+                        "at_ball": bool(status.get("at_ball", False))})
 
 
 def _post_posture(path: str, target: str, settle_s: float = 0.0) -> str:
@@ -351,6 +389,18 @@ def _with_face_outcome(reply: str) -> str:
 
 
 @tool
+def go_to_ball() -> str:
+    """Walk to the ball and stop one foot length in front of it. Returns when it is there or gave up.
+
+    Faces the ball first, walks at the slow speed, keeps the head on the ball.
+    The reply says approach: arrived, gave_up (20 s without getting there) or
+    walking (still going when the wait ran out). The reply also says lost true
+    when the ball was never found, and at_ball true when a kick can reach it.
+    """
+    return _post_and_wait_for("/go_to_ball", "approach", APPROACH_OVER, GO_TO_BALL_MAX_WAIT_S)
+
+
+@tool
 def status() -> str:
     """Current robot state: active policy, speeds, head pose, fallen or not."""
     return _get("/status")
@@ -358,5 +408,5 @@ def status() -> str:
 
 ALL_TOOLS = [
     walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, follow_ball, face_ball,
-    status,
+    go_to_ball, status,
 ]
