@@ -404,6 +404,9 @@ class ViewerCommander:
         return _yaw(self._env.scene["robot"].data.root_link_quat_w[0])
 
     def _turning(self) -> bool:
+        if self._at_ball():
+            return False
+
         return self._facing and (self._turner.turning or self._hunt is not None)
 
     def _start_go_to_ball(self) -> None:

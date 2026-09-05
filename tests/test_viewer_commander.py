@@ -1183,6 +1183,15 @@ def test_an_arrived_robot_never_hunts_when_the_ball_drops_out_of_view():
     assert _twist(env) == [0.0, 0.0, 0.0]
 
 
+def test_turning_reads_false_once_arrived():
+    env, state, commander = _going_setup(col=100, row=118)
+    _pictures(commander, 12)
+    status = state.get_status()
+    assert status["at_ball"] is True
+    assert status["turning"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
 def test_a_lost_ball_stops_the_walk():
     env, state, commander = _going_setup(col=80, row=70)
     _pictures(commander, 1)
