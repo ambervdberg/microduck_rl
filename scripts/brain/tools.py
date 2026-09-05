@@ -286,8 +286,8 @@ def kick(foot: str = "right") -> str:
     """Kick the ball with one foot, 'right' or 'left'. Returns once the kick is over.
 
     The robot must be standing and free. Nothing checks for a ball: with no
-    ball at that foot the kick swings at air, like the real robot. When unsure
-    whether a ball is there, call new_ball for the same foot first.
+    ball at that foot the kick swings at air, like the real robot. Do not call
+    new_ball before a kick on your own, the user asks for a ball.
     """
     return _post_trick("/kick", KICK_SECONDS, {"foot": foot})
 
