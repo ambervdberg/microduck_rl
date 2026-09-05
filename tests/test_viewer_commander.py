@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
+    GROUND_PICK_SECONDS,
     KICK_SECONDS,
     NO_TRICK,
     ROLL_SECONDS,
@@ -562,3 +563,56 @@ def test_new_ball_does_not_touch_the_command():
     state.submit_ball("right")
     commander.tick()
     assert _head(env) == pytest.approx([0.0, 0.3, 0.0, 0.0])
+
+
+def _ticks(commander, count):
+    for _ in range(count):
+        commander.tick()
+
+
+def test_ground_pick_is_offered_only_with_its_policy():
+    _env, state, commander = _setup()
+    commander.tick()
+    assert state.get_status()["actions"]["ground pick"] is False
+
+    _env, state, commander = _setup(ground_pick=True)
+    commander.tick()
+    assert state.get_status()["actions"]["ground pick"] is True
+
+
+def test_ground_pick_writes_the_phase_start_and_swaps_policy():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_ground_pick()
+    commander.tick()
+    assert commander.active_policy() == "ground_pick"
+    assert state.get_status()["trick"] == "picking"
+    assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
+
+
+def test_ground_pick_phase_advances_with_time():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_ground_pick()
+    commander.tick()
+    _ticks(commander, int(round(GROUND_PICK_SECONDS / 4 / DT)))
+    assert _twist(env) == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+    _ticks(commander, int(round(GROUND_PICK_SECONDS / 4 / DT)))
+    assert _twist(env) == pytest.approx([-1.0, 0.0, 0.0], abs=1e-6)
+
+
+def test_ground_pick_zeroes_the_head_even_after_a_look():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_look(0.4, 0.2)
+    commander.tick()
+    state.submit_ground_pick()
+    commander.tick()
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_ground_pick_hands_back_to_walking_at_four_seconds():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_ground_pick()
+    commander.tick()
+    _tick_for(commander, GROUND_PICK_SECONDS)
+    assert commander.active_policy() == "walking"
+    assert state.get_status()["trick"] == NO_TRICK
+    assert _twist(env) == [0.0, 0.0, 0.0]

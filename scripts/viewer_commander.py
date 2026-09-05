@@ -4,6 +4,7 @@ The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
 TrickCmd / BallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
 to PolicyInference. Here ViewerCommander applies them to the env's command terms
 instead, once per policy step, and publishes the status the bridge serves on /status.
+During a ground pick the twist slots carry the phase encoding the policy was trained on.
 """
 from __future__ import annotations
 
@@ -97,6 +98,7 @@ class ViewerCommander:
         self._posture = "standing"
         self._rise_until = 0.0
         self._trick: str | None = None
+        self._trick_started = 0.0
         self._trick_until = 0.0
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
@@ -185,6 +187,7 @@ class ViewerCommander:
         """Hand the robot to a trick policy on an all-zero command block."""
         self._clear_commands()
         self._trick = name
+        self._trick_started = self._time
         self._trick_until = self._time + TRICKS[name].seconds
 
     def _expire_trick(self) -> None:
@@ -263,13 +266,8 @@ class ViewerCommander:
         for i, value in enumerate(self._twist_command()):
             twist.vel_command_b[:, i] = value
 
-        head = list(self._head)
-        offset = self._gesture_offset()
-        if offset is not None:
-            axis, value = offset
-            head[axis] += value
         head_term = manager.get_term("head_pose")
-        for i, value in enumerate(head):
+        for i, value in enumerate(self._head_command()):
             head_term._command[:, i] = value
 
         # The play cfg samples a random body pose at reset and the term is pinned.
@@ -279,7 +277,10 @@ class ViewerCommander:
             body_term._command[:, i] = 0.0
 
     def _twist_command(self) -> list[float]:
-        """Sitting writes the posture flag in the vx slot, rising writes the stand flag, zero."""
+        """The twist slots: posture flag while sitting, phase encoding during a ground pick, else the walk."""
+        if self._trick == "ground_pick":
+            return self._ground_pick_phase_command()
+
         if self._posture == "sitting":
             return [1.0, 0.0, 0.0]
 
@@ -287,6 +288,23 @@ class ViewerCommander:
             return [0.0, 0.0, 0.0]
 
         return self._twist
+
+    def _ground_pick_phase_command(self) -> list[float]:
+        """[cos(2πφ), sin(2πφ), 0], φ from 0 at the start to 1 at the end of the cycle."""
+        phase = (self._time - self._trick_started) / TRICKS["ground_pick"].seconds
+        return [math.cos(2.0 * math.pi * phase), math.sin(2.0 * math.pi * phase), 0.0]
+
+    def _head_command(self) -> list[float]:
+        """The head slots: zero during a trick, else the held pose plus the gesture wave."""
+        if self._trick_runs():
+            return [0.0, 0.0, 0.0, 0.0]
+
+        head = list(self._head)
+        offset = self._gesture_offset()
+        if offset is not None:
+            axis, value = offset
+            head[axis] += value
+        return head
 
     def _gesture_offset(self) -> tuple[int, float] | None:
         """Sine wave on head pitch (nod) or yaw (shake) for GESTURE_SECONDS."""
