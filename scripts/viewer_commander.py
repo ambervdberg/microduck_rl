@@ -1,7 +1,7 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
 The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
-TrickCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
+TrickCmd / BallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
 to PolicyInference. Here ViewerCommander applies them to the env's command terms
 instead, once per policy step, and publishes the status the bridge serves on /status.
 """
@@ -10,11 +10,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+import torch
+
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
     RISE_SECONDS,
     TRICKS,
+    BallCmd,
     BridgeState,
     GestureCmd,
     LookCmd,
@@ -26,6 +29,7 @@ from bridge.state import (
     available_actions,
 )
 from bridge.watchdog import BrainWatchdog
+from mjlab_microduck.tasks.microduck_ball_kick_env_cfg import BALL_OFFSET_ABS_Y, BALL_OFFSET_X, BALL_RADIUS
 
 # Head command layout: [neck_pitch, head_pitch, head_yaw, head_roll].
 HEAD_PITCH = 1
@@ -44,6 +48,12 @@ class _GestureKeys:
 
     def keys(self):
         return tuple(GESTURE_KEYS.values())
+
+
+def _yaw(quat) -> float:
+    """Heading of a (w, x, y, z) quaternion about the world z axis."""
+    w, x, y, z = (float(v) for v in quat)
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 @dataclass
@@ -136,6 +146,8 @@ class ViewerCommander:
             self._set_posture(cmd.sit)
         elif isinstance(cmd, TrickCmd):
             self._start_trick(cmd.name)
+        elif isinstance(cmd, BallCmd):
+            self._place_ball(cmd.foot)
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
@@ -210,6 +222,23 @@ class ViewerCommander:
         self._head = [0.0, 0.0, 0.0, 0.0]
         self._gesture = None
         self._walk_until = 0.0
+
+    # Ball.
+
+    def _place_ball(self, foot: str) -> None:
+        """Put the ball at the training spot in front of one foot, at rest."""
+        robot = self._env.scene["robot"].data
+        x, y = float(robot.root_link_pos_w[0, 0]), float(robot.root_link_pos_w[0, 1])
+        yaw = _yaw(robot.root_link_quat_w[0])
+        off_y = -BALL_OFFSET_ABS_Y if foot == "right" else BALL_OFFSET_ABS_Y
+
+        ball_x = x + math.cos(yaw) * BALL_OFFSET_X - math.sin(yaw) * off_y
+        ball_y = y + math.sin(yaw) * BALL_OFFSET_X + math.cos(yaw) * off_y
+        pose = torch.tensor([[ball_x, ball_y, BALL_RADIUS, 1.0, 0.0, 0.0, 0.0]], device=self._env.device)
+
+        ball = self._env.scene["ball"]
+        ball.write_root_link_pose_to_sim(pose)
+        ball.write_root_link_velocity_to_sim(torch.zeros(1, 6, device=self._env.device))
 
     # Tensors.
 
