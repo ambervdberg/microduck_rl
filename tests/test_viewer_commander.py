@@ -11,6 +11,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from bridge.follower import (
+    APPROACH_SPEED,
+    ARRIVE_PITCH,
     FACE_START,
     FACE_STOP,
     FACE_TURN_MIN,
@@ -1113,3 +1115,102 @@ def test_the_handover_from_the_hunt_closes_the_last_bit():
     bearing = _bearing_at(60, yaw)
     assert FACE_STOP < abs(bearing) < FACE_START
     assert _twist(env)[2] == pytest.approx(math.copysign(FACE_TURN_MIN, bearing))
+
+
+def _going_setup(col=80, row=70):
+    """A commander with a camera and a walker, a ball a little ahead, one tick into the approach."""
+    env, state, commander = _setup(kick_right=True, camera=True)
+    env.scene["head_camera"].paint(col, row)
+    state.submit_go_to_ball()
+    commander.tick()
+    return env, state, commander
+
+
+def test_go_to_ball_is_offered_only_with_a_camera():
+    _env, state, commander = _setup(kick_right=True, camera=True)
+    commander.tick()
+    assert state.get_status()["actions"]["go to ball"] is True
+
+
+def test_going_starts_the_face_and_the_follow():
+    _env, state, commander = _going_setup()
+    status = state.get_status()
+    assert status["following"] is True
+    assert status["facing"] is True
+    assert status["approach"] in ("lost", "walking")
+    assert status["at_ball"] is False
+
+
+def test_a_ball_ahead_means_walking_forward_slowly():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    # float32 rounding on the command tensor, not the picture math: approx, not ==.
+    assert _twist(env)[0] == pytest.approx(APPROACH_SPEED)
+    assert _twist(env)[2] == 0.0
+    assert state.get_status()["approach"] == "walking"
+
+
+def test_a_ball_far_to_the_side_means_turning_first():
+    env, state, commander = _going_setup(col=156, row=60)
+    _pictures(commander, 4)
+    assert _twist(env)[0] == 0.0
+    assert _twist(env)[2] < 0.0
+    assert state.get_status()["approach"] == "turning"
+
+
+def test_the_head_looking_far_down_means_arrived():
+    env, state, commander = _going_setup(col=80, row=118)
+    _pictures(commander, 12)
+    assert _head(env)[HEAD_PITCH] >= ARRIVE_PITCH
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    status = state.get_status()
+    assert status["approach"] == "arrived"
+    assert status["at_ball"] is True
+    assert status["following"] is True
+
+
+def test_a_lost_ball_stops_the_walk():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    env.scene["head_camera"].clear()
+    _pictures(commander, 1)
+    assert _twist(env)[0] == 0.0
+    assert state.get_status()["approach"] == "lost"
+
+
+def test_a_chat_walk_ends_the_approach():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    state.submit_walk(0.2, 0.0, 0.0, 2.0)
+    commander.tick()
+    status = state.get_status()
+    assert status["approach"] == "none"
+    assert status["facing"] is False
+    assert _twist(env) == pytest.approx([0.2, 0.0, 0.0])
+
+
+def test_stop_ends_the_approach():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    state.submit_stop()
+    commander.tick()
+    assert state.get_status()["approach"] == "none"
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_fall_stops_the_walk_at_once():
+    env, _state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    env.scene["robot"] = _FallenRobot()
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_the_watchdog_ends_the_approach_and_keeps_the_follow():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    _tick_silently(commander, BRAIN_TIMEOUT_S + 1.0)
+    status = state.peek_status()
+    assert status["approach"] == "none"
+    assert status["following"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]

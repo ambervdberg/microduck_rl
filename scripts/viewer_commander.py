@@ -1,15 +1,17 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
 The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
-TrickCmd / BallCmd / FollowBallCmd / FaceBallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py
-a SkillRunner applies them to PolicyInference. Here ViewerCommander applies them to the env's
-command terms instead, once per policy step, and publishes the status the bridge serves on
-/status. During a ground pick the twist slots carry the phase encoding the policy was trained
-on. A follow reads the head camera every PICTURE_EVERY ticks and steers the head pose slots.
+TrickCmd / BallCmd / FollowBallCmd / FaceBallCmd / GoToBallCmd / StopCmd / ResetCmd on a
+BridgeState. In infer_policy.py a SkillRunner applies them to PolicyInference. Here
+ViewerCommander applies them to the env's command terms instead, once per policy step, and
+publishes the status the bridge serves on /status. During a ground pick the twist slots carry
+the phase encoding the policy was trained on. A follow reads the head camera every
+PICTURE_EVERY ticks and steers the head pose slots.
 A face steers the body on the ball's bearing, head yaw plus where the ball sits in the picture,
 and writes the turn rate into the twist yaw slot with zero forward speed.
 While the ball is out of view a face turns the body a full circle to look for it, then gives
-up and reports lost.
+up and reports lost. An approach adds the forward speed to the twist while the face turns
+the body.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from dataclasses import dataclass, field
 import torch
 
 from bridge.ball_finder import BallSighting, find_ball
-from bridge.follower import BallFollower, BallHunt, BodyTurner, ball_bearing
+from bridge.follower import BallApproach, BallFollower, BallHunt, BodyTurner, ball_bearing
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
@@ -30,6 +32,7 @@ from bridge.state import (
     FaceBallCmd,
     FollowBallCmd,
     GestureCmd,
+    GoToBallCmd,
     LookCmd,
     PostureCmd,
     ResetCmd,
@@ -122,6 +125,8 @@ class ViewerCommander:
         self._facing = False
         self._turner: BodyTurner | None = None
         self._turn = 0.0
+        self._approach: BallApproach | None = None
+        self._speed = 0.0
         self._hunt: BallHunt | None = None
         self._lost = False
         self._watchdog = BrainWatchdog(state, control_dt)
@@ -185,6 +190,8 @@ class ViewerCommander:
             self._start_follow()
         elif isinstance(cmd, FaceBallCmd):
             self._start_face()
+        elif isinstance(cmd, GoToBallCmd):
+            self._start_go_to_ball()
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
@@ -314,6 +321,7 @@ class ViewerCommander:
         pitch, yaw = self._follower.update(sighting, self._head[HEAD_PITCH], self._head[HEAD_YAW])
         self._head = [0.0, pitch, yaw, 0.0]
         self._turn_tick(ball_bearing(yaw, sighting))
+        self._approach_tick(sighting, pitch)
 
     def _picture(self):
         """The latest head camera picture as height by width by 3, on the CPU."""
@@ -347,6 +355,8 @@ class ViewerCommander:
 
     def _stop_face(self) -> None:
         """Stop turning. The follow, if any, goes on."""
+        self._approach = None
+        self._speed = 0.0
         self._facing = False
         self._turner = None
         self._turn = 0.0
@@ -391,6 +401,25 @@ class ViewerCommander:
 
     def _turning(self) -> bool:
         return self._facing and (self._turner.turning or self._hunt is not None)
+
+    def _start_go_to_ball(self) -> None:
+        """Face the ball and walk up to it. The approach ends itself at arrived or gave up."""
+        self._start_face()
+        self._approach = BallApproach(PICTURE_EVERY * self._dt)
+
+    def _approach_tick(self, sighting, pitch: float) -> None:
+        """Forward speed from the approach rule, once per picture."""
+        if self._approach is None:
+            return
+
+        self._speed = self._approach.update(sighting, pitch, self._follower.searching, self._turning())
+
+    def _approach_status(self) -> str:
+        """The approach state for /status, or "none" when no approach runs."""
+        if self._approach is None:
+            return "none"
+
+        return self._approach.state
 
     # Tensors.
 
@@ -437,7 +466,7 @@ class ViewerCommander:
             return [0.0, 0.0, 0.0]
 
         if self._facing:
-            return [0.0, 0.0, self._turn]
+            return [self._speed, 0.0, self._turn]
 
         return self._twist
 
@@ -503,5 +532,7 @@ class ViewerCommander:
             "facing": self._facing,
             "turning": self._turning(),
             "lost": self._lost,
+            "approach": self._approach_status(),
+            "at_ball": self._approach_status() == "arrived",
             "actions": dict(self._actions),
         })
