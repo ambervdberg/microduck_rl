@@ -367,6 +367,10 @@ class ViewerCommander:
         if not self._facing:
             return
 
+        if self._at_ball():
+            self._turn = 0.0
+            return
+
         if self._follower.searching:
             # Clears the turner latch. The hunt drives the body while the ball is out of view.
             self._turner.update(bearing, searching=True)
@@ -420,6 +424,10 @@ class ViewerCommander:
             return "none"
 
         return self._approach.state
+
+    def _at_ball(self) -> bool:
+        """True once the approach has arrived. The body then holds still whatever the head sees."""
+        return self._approach is not None and self._approach.state == "arrived"
 
     # Tensors.
 
@@ -533,6 +541,6 @@ class ViewerCommander:
             "turning": self._turning(),
             "lost": self._lost,
             "approach": self._approach_status(),
-            "at_ball": self._approach_status() == "arrived",
+            "at_ball": self._at_ball(),
             "actions": dict(self._actions),
         })

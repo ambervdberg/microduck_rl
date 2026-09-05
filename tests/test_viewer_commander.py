@@ -1169,6 +1169,20 @@ def test_the_head_looking_far_down_means_arrived():
     assert status["following"] is True
 
 
+def test_an_arrived_robot_never_hunts_when_the_ball_drops_out_of_view():
+    env, state, commander = _going_setup(col=80, row=118)
+    _pictures(commander, 12)
+    assert state.get_status()["at_ball"] is True
+    env.scene["head_camera"].clear()
+    _tick_for(commander, LOST_AFTER_S)
+    _pictures(commander, 2)
+    status = state.get_status()
+    assert status["searching"] is True
+    assert status["turning"] is False
+    assert status["at_ball"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
 def test_a_lost_ball_stops_the_walk():
     env, state, commander = _going_setup(col=80, row=70)
     _pictures(commander, 1)
