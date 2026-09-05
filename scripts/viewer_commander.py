@@ -60,6 +60,9 @@ class ViewerLimits:
     sit_session: bool = False  # truthy: a sitstand policy is loaded
     roulade_session: bool = False  # truthy: a roulade policy is loaded
     standup_session: bool = False  # truthy: a get up policy is loaded
+    kick_right_session: bool = False  # truthy: a right foot kick policy is loaded
+    kick_left_session: bool = False  # truthy: a left foot kick policy is loaded
+    ground_pick_session: bool = False  # truthy: a ground pick policy is loaded
     gesture_player: _GestureKeys = field(default_factory=_GestureKeys)
 
 
