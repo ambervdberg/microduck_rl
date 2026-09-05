@@ -1,4 +1,5 @@
 """The follower turns ball sightings into the next head pose, and sweeps when the ball is lost."""
+import math
 import os
 import sys
 
@@ -14,11 +15,13 @@ from bridge.follower import (
     FACE_START,
     FACE_STOP,
     GAIN,
+    HUNT_RATE,
     LOST_AFTER_S,
     SEARCH_PITCH,
     SEARCH_RATE,
     SEARCH_YAW_MAX,
     BallFollower,
+    BallHunt,
     BodyTurner,
 )
 from bridge.state import HEAD_PITCH_MAX, HEAD_YAW_MAX
@@ -181,3 +184,42 @@ def test_searching_holds_the_body_still():
     turner.update(0.5, searching=False)
     assert turner.update(1.0, searching=True) == 0.0
     assert turner.turning is False
+
+
+def test_the_hunt_turns_the_way_the_head_looked():
+    assert BallHunt(direction=-0.4).update(0.0) == -HUNT_RATE
+    assert BallHunt(direction=0.4).update(0.0) == HUNT_RATE
+
+
+def test_the_hunt_turns_left_when_the_head_was_straight():
+    assert BallHunt(direction=0.0).update(0.0) == HUNT_RATE
+
+
+def test_the_hunt_keeps_going_before_a_full_turn():
+    hunt = BallHunt(direction=1.0)
+    for yaw in (0.0, 1.5, 3.0):
+        assert hunt.update(yaw) == HUNT_RATE
+    assert hunt.gave_up is False
+
+
+def test_the_hunt_gives_up_after_a_full_turn():
+    hunt = BallHunt(direction=1.0)
+    for step in range(8):
+        hunt.update(step * 1.0)
+    assert hunt.gave_up is True
+    assert hunt.update(8.0) == 0.0
+
+
+def test_the_turn_count_crosses_the_pi_seam():
+    hunt = BallHunt(direction=1.0)
+    hunt.update(3.0)
+    hunt.update(-3.0)
+    assert hunt.turned == pytest.approx(2 * math.pi - 6.0)
+
+
+def test_turning_the_wrong_way_counts_down():
+    hunt = BallHunt(direction=1.0)
+    hunt.update(0.0)
+    hunt.update(-1.0)
+    assert hunt.turned == pytest.approx(-1.0)
+    assert hunt.gave_up is False

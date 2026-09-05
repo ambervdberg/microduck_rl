@@ -7,6 +7,8 @@ command terms instead, once per policy step, and publishes the status the bridge
 /status. During a ground pick the twist slots carry the phase encoding the policy was trained
 on. A follow reads the head camera every PICTURE_EVERY ticks and steers the head pose slots.
 A face writes the turn rate into the twist yaw slot with zero forward speed.
+While the ball is out of view a face turns the body a full circle to look for it, then gives
+up and reports lost.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from dataclasses import dataclass, field
 import torch
 
 from bridge.ball_finder import BallSighting, find_ball
-from bridge.follower import BallFollower, BodyTurner
+from bridge.follower import BallFollower, BallHunt, BodyTurner
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
@@ -119,6 +121,8 @@ class ViewerCommander:
         self._facing = False
         self._turner: BodyTurner | None = None
         self._turn = 0.0
+        self._hunt: BallHunt | None = None
+        self._lost = False
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
@@ -284,6 +288,7 @@ class ViewerCommander:
         self._follower = BallFollower(PICTURE_EVERY * self._dt)
         self._following = True
         self._ticks_since_picture = 0
+        self._lost = False
 
     def _stop_follow(self) -> None:
         """Drop the follower. The head stays where it is until the next command."""
@@ -340,16 +345,43 @@ class ViewerCommander:
         self._facing = False
         self._turner = None
         self._turn = 0.0
+        self._hunt = None
 
     def _turn_tick(self, yaw: float) -> None:
-        """Turn rate from the head yaw, once per picture."""
+        """Turn rate once per picture: toward the head while the ball is in view, the hunt while it is not."""
         if not self._facing:
             return
 
-        self._turn = self._turner.update(yaw, self._follower.searching)
+        if self._follower.searching:
+            self._turner.update(yaw, searching=True)
+            self._turn = self._hunt_tick(yaw)
+            return
+
+        self._hunt = None
+        self._turn = self._turner.update(yaw, searching=False)
+
+    def _hunt_tick(self, yaw: float) -> float:
+        """Turn the body the way the head looked when the ball went out of view. A full turn gives up."""
+        if self._hunt is None:
+            self._hunt = BallHunt(direction=yaw)
+
+        turn = self._hunt.update(self._body_yaw())
+        if self._hunt.gave_up:
+            self._give_up()
+
+        return turn
+
+    def _give_up(self) -> None:
+        """No ball after a full turn. The face and the follow end, the head goes home."""
+        self._stop_follow()
+        self._head = [0.0, 0.0, 0.0, 0.0]
+        self._lost = True
+
+    def _body_yaw(self) -> float:
+        return _yaw(self._env.scene["robot"].data.root_link_quat_w[0])
 
     def _turning(self) -> bool:
-        return self._turner is not None and self._turner.turning
+        return self._facing and (self._turner.turning or self._hunt is not None)
 
     # Tensors.
 
@@ -461,5 +493,6 @@ class ViewerCommander:
             "searching": self._searching(),
             "facing": self._facing,
             "turning": self._turning(),
+            "lost": self._lost,
             "actions": dict(self._actions),
         })

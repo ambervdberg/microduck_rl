@@ -1,6 +1,8 @@
 """ViewerCommander applies bridge commands to a fake env's command terms."""
+import math
 import os
 import sys
+import types
 
 import pytest
 import torch
@@ -8,7 +10,7 @@ import torch
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from bridge.follower import FACE_START, FACE_STOP, LOST_AFTER_S, SEARCH_PITCH
+from bridge.follower import FACE_GAIN, FACE_START, FACE_STOP, HUNT_RATE, LOST_AFTER_S, SEARCH_PITCH
 from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
@@ -906,14 +908,6 @@ def test_the_turn_stays_under_the_envelope():
     assert _twist(env)[2] == pytest.approx(-state.policy().vel_max_ang)
 
 
-def test_the_body_holds_while_searching():
-    env, _state, commander = _facing_setup(col=156, row=60)
-    _turn_head_past_start(commander)
-    env.scene["head_camera"].clear()
-    _tick_for(commander, LOST_AFTER_S)
-    assert _twist(env) == [0.0, 0.0, 0.0]
-
-
 def test_a_chat_walk_ends_the_face_and_keeps_the_follow():
     env, state, commander = _facing_setup(col=156, row=60)
     _turn_head_past_start(commander)
@@ -964,3 +958,92 @@ def test_follow_ball_alone_never_turns_the_body():
     _turn_head_past_start(commander)
     assert _head(env)[HEAD_YAW] < -FACE_START
     assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+class _TurningRobot:
+    """A standing robot whose heading the test sets."""
+
+    def __init__(self):
+        self.data = types.SimpleNamespace(
+            projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]),
+            root_link_lin_vel_b=torch.tensor([[0.0, 0.0, 0.0]]),
+            root_link_ang_vel_b=torch.tensor([[0.0, 0.0, 0.0]]),
+            root_link_pos_w=torch.tensor([[1.0, 2.0, 0.11]]),
+            root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        )
+
+    def face(self, yaw):
+        self.data.root_link_quat_w = torch.tensor([[math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]])
+
+
+def _lose_the_ball(env, commander):
+    """Clear the picture and wait until the follower searches."""
+    env.scene["head_camera"].clear()
+    _tick_for(commander, LOST_AFTER_S)
+    _pictures(commander, 1)
+
+
+def _hunt_until_lost(env, commander):
+    """Spin the fake body past a full turn with no ball in view."""
+    robot = _TurningRobot()
+    env.scene["robot"] = robot
+    for step in range(1, 16):
+        robot.face(-0.5 * step)
+        _pictures(commander, 1)
+
+
+def test_a_lost_ball_turns_the_body_the_way_the_head_looked():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    assert _twist(env) == pytest.approx([0.0, 0.0, -HUNT_RATE])
+    status = state.get_status()
+    assert status["turning"] is True
+    assert status["lost"] is False
+
+
+def test_a_sighting_during_the_hunt_hands_back_to_the_turner():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    env.scene["head_camera"].paint(120, 60)
+    _pictures(commander, 1)
+    yaw = _head(env)[HEAD_YAW]
+    assert yaw < -FACE_START
+    assert _twist(env)[2] == pytest.approx(FACE_GAIN * yaw)
+    assert state.get_status()["lost"] is False
+
+
+def test_a_full_turn_without_the_ball_gives_up():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    status = state.get_status()
+    assert status["lost"] is True
+    assert status["facing"] is False
+    assert status["following"] is False
+    assert status["turning"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_a_new_face_clears_lost():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    env.scene["head_camera"].paint(120, 60)
+    state.submit_face_ball()
+    commander.tick()
+    status = state.get_status()
+    assert status["lost"] is False
+    assert status["facing"] is True
+
+
+def test_a_plain_follow_never_hunts():
+    env, state, commander = _following_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert state.get_status()["lost"] is False

@@ -5,7 +5,10 @@ it at the middle. Searching, after LOST_AFTER_S without a ball: the head looks
 a bit down and sweeps left and right until the ball shows up again. No sim here.
 Head signs: positive pitch looks down, positive yaw looks left.
 BodyTurner turns the head yaw into a body turn rate for the face ball skill.
+BallHunt turns the body a full circle while the ball is out of view, then gives up.
 """
+
+import math
 
 from bridge.ball_finder import BallSighting
 from bridge.state import HEAD_PITCH_MAX, HEAD_YAW_MAX
@@ -20,6 +23,14 @@ SEARCH_RATE = 1.0     # rad/s of sweep
 FACE_START = 0.3      # rad of head yaw that starts a body turn
 FACE_STOP = 0.1       # rad of head yaw that ends it, the gap stops flip-flopping
 FACE_GAIN = 1.0       # rad/s of body turn per rad of head yaw
+
+HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
+HUNT_FULL_TURN = 2 * math.pi  # rad of body turn without a sighting, then the hunt gives up
+
+
+def wrap_angle(angle: float) -> float:
+    """Into -pi..pi."""
+    return (angle + math.pi) % (2 * math.pi) - math.pi
 
 
 class BallFollower:
@@ -114,3 +125,33 @@ class BodyTurner:
             return 0.0
 
         return max(-self._turn_max, min(self._turn_max, FACE_GAIN * yaw))
+
+
+class BallHunt:
+    """Body turn while the ball is out of view. One full turn without a sighting gives up."""
+
+    def __init__(self, direction: float):
+        self._direction = -1.0 if direction < 0.0 else 1.0
+        self._turned = 0.0
+        self._last_body_yaw: float | None = None
+
+    @property
+    def turned(self) -> float:
+        """Rad turned in the hunt direction so far, from the measured heading."""
+        return self._turned
+
+    @property
+    def gave_up(self) -> bool:
+        """True once the body has turned HUNT_FULL_TURN without a sighting."""
+        return self._turned >= HUNT_FULL_TURN
+
+    def update(self, body_yaw: float) -> float:
+        """Turn rate for this picture. body_yaw is the measured heading in rad."""
+        if self._last_body_yaw is not None:
+            self._turned += self._direction * wrap_angle(body_yaw - self._last_body_yaw)
+        self._last_body_yaw = body_yaw
+
+        if self.gave_up:
+            return 0.0
+
+        return self._direction * HUNT_RATE
