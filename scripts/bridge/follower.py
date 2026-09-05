@@ -110,6 +110,10 @@ class BodyTurner:
         """True while the body is catching up with the head."""
         return self._turning
 
+    def engage(self) -> None:
+        """Start turning now, whatever the head yaw. The turn still ends under FACE_STOP."""
+        self._turning = True
+
     def update(self, yaw: float, searching: bool) -> float:
         """Turn rate in rad/s. Zero while searching, or while the head is near the middle."""
         if searching:

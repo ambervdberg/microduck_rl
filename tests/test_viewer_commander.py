@@ -894,10 +894,10 @@ def test_the_body_turns_right_once_the_head_looks_far_right():
     assert state.get_status()["turning"] is True
 
 
-def test_the_body_holds_while_the_head_is_near_the_middle():
-    env, state, commander = _facing_setup(col=90, row=60)
+def test_the_body_holds_while_the_head_is_under_the_stop_yaw():
+    env, state, commander = _facing_setup(col=100, row=60)
     _pictures(commander, 2)
-    assert abs(_head(env)[HEAD_YAW]) < FACE_START
+    assert abs(_head(env)[HEAD_YAW]) < FACE_STOP
     assert _twist(env) == [0.0, 0.0, 0.0]
     assert state.get_status()["turning"] is False
 
@@ -1047,3 +1047,23 @@ def test_a_plain_follow_never_hunts():
     _lose_the_ball(env, commander)
     assert _twist(env) == [0.0, 0.0, 0.0]
     assert state.get_status()["lost"] is False
+
+
+def test_a_face_turns_from_a_head_yaw_between_stop_and_start():
+    env, state, commander = _facing_setup(col=150, row=60)
+    _pictures(commander, 2)
+    yaw = _head(env)[HEAD_YAW]
+    assert FACE_STOP < -yaw < FACE_START
+    assert _twist(env)[2] == pytest.approx(FACE_GAIN * yaw)
+    assert state.get_status()["turning"] is True
+
+
+def test_the_handover_from_the_hunt_closes_the_last_bit():
+    env, _state, commander = _facing_setup(col=156, row=60)
+    _pictures(commander, 2)
+    _lose_the_ball(env, commander)
+    env.scene["head_camera"].paint(120, 60)
+    _pictures(commander, 1)
+    yaw = _head(env)[HEAD_YAW]
+    assert FACE_STOP < -yaw < FACE_START
+    assert _twist(env)[2] == pytest.approx(FACE_GAIN * yaw)

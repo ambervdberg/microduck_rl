@@ -335,9 +335,10 @@ class ViewerCommander:
         return self._follower is not None and self._follower.searching
 
     def _start_face(self) -> None:
-        """Follow with the head and let the body catch up with it."""
+        """Follow with the head and turn the body until the head is straight, from any head yaw."""
         self._start_follow()
         self._turner = BodyTurner(float(self._state.policy().vel_max_ang))
+        self._turner.engage()
         self._facing = True
 
     def _stop_face(self) -> None:
@@ -357,7 +358,10 @@ class ViewerCommander:
             self._turn = self._hunt_tick(yaw)
             return
 
-        self._hunt = None
+        if self._hunt is not None:
+            self._hunt = None
+            self._turner.engage()
+
         self._turn = self._turner.update(yaw, searching=False)
 
     def _hunt_tick(self, yaw: float) -> float:

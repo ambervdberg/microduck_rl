@@ -223,3 +223,17 @@ def test_turning_the_wrong_way_counts_down():
     hunt.update(-1.0)
     assert hunt.turned == pytest.approx(-1.0)
     assert hunt.gave_up is False
+
+
+def test_engage_turns_from_between_stop_and_start():
+    turner = BodyTurner(TURN_MAX)
+    turner.engage()
+    assert turner.update(0.2, searching=False) == pytest.approx(FACE_GAIN * 0.2)
+    assert turner.turning is True
+
+
+def test_engage_ends_at_once_under_the_stop_yaw():
+    turner = BodyTurner(TURN_MAX)
+    turner.engage()
+    assert turner.update(FACE_STOP / 2, searching=False) == 0.0
+    assert turner.turning is False
