@@ -1135,3 +1135,38 @@ class TestBridgeServer:
         assert excinfo.value.code == 400
         assert "error" in json.loads(excinfo.value.read())
         assert state.drain() == []
+
+    def test_kick_roundtrip_defaults_to_the_right_foot(self):
+        with _served(FakePolicy(kick_right=True, kick_left=True)) as (state, url):
+            assert _post(f"{url}/kick", {}) == (200, {"trick": "kick_right"})
+            assert state.drain() == [TrickCmd("kick_right")]
+            assert _post(f"{url}/kick", {"foot": "left"}) == (200, {"trick": "kick_left"})
+            assert state.drain() == [TrickCmd("kick_left")]
+
+    def test_ball_roundtrip(self):
+        with _served(FakePolicy(kick_right=True, kick_left=True)) as (state, url):
+            assert _post(f"{url}/ball", {}) == (200, {"ball": "right"})
+            assert _post(f"{url}/ball", {"foot": "left"}) == (200, {"ball": "left"})
+            assert state.drain() == [BallCmd("right"), BallCmd("left")]
+
+    def test_kick_without_its_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/kick", {"foot": "left"})
+        assert excinfo.value.code == 400
+        assert "no kick_left policy loaded" in json.loads(excinfo.value.read())["error"]
+        assert state.drain() == []
+
+    def test_ball_without_a_kick_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/ball", {})
+        assert excinfo.value.code == 400
+        assert state.drain() == []
+
+    def test_kick_with_an_unknown_foot_returns_400(self):
+        with _served(FakePolicy(kick_right=True)) as (state, url):
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                _post(f"{url}/kick", {"foot": "middle"})
+            assert excinfo.value.code == 400
+            assert state.drain() == []

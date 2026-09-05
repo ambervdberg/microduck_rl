@@ -14,6 +14,8 @@ Routes:
     POST /stand     stand back up, no body
     POST /roll      one forward roll, no body
     POST /get_up    get up off the floor, no body
+    POST /kick      {"foot": "right" | "left"}, kick with that foot, right by default
+    POST /ball      {"foot": "right" | "left"}, new ball in front of that foot
     POST /stop      zero twist, head and gesture
     POST /reset     stop, and respawn the robot where the sim supports it
 """
@@ -73,6 +75,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         "/stand": "_stand",
         "/roll": "_roll",
         "/get_up": "_get_up",
+        "/kick": "_kick",
+        "/ball": "_ball",
         "/reset": "_reset",
     }
 
@@ -186,6 +190,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # Get up off the floor. For a seated robot /stand is the route instead.
     def _get_up(self, _body: dict) -> dict:
         return self._state.submit_trick("get_up")
+
+    # Kick with one foot, right by default. Nothing checks for a ball.
+    def _kick(self, body: dict) -> dict:
+        return self._state.submit_kick(body.get("foot", "right"))
+
+    # Put a new ball in front of one foot, right by default.
+    def _ball(self, body: dict) -> dict:
+        return self._state.submit_ball(body.get("foot", "right"))
 
     # Zero everything now.
     def _stop(self, _body: dict) -> dict:
