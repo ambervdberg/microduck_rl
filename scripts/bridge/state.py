@@ -94,6 +94,11 @@ class FollowBallCmd:
 
 
 @dataclass(frozen=True)
+class FaceBallCmd:
+    """Follow the ball with the head and turn the body until it is straight ahead."""
+
+
+@dataclass(frozen=True)
 class Trick:
     """One trick: the policy that runs it, how long it takes, what /status calls it."""
 
@@ -141,6 +146,7 @@ ACTIONS = (
     ("roulade", "roulade_session"),
     ("get up off the floor", "standup_session"),
     ("follow ball", "camera"),
+    ("face ball", "camera"),
 )
 
 
@@ -348,6 +354,19 @@ class BridgeState:
         self._enqueue(FollowBallCmd())
 
         return {"following": True}
+
+    def submit_face_ball(self) -> dict:
+        """Queue a face. Needs the walker for the turn, a camera, and a standing, free, upright robot."""
+        self._note_request()
+        self._require_walking_policy()
+        self._require_camera()
+        self._require_not_seated("sitting, stand up first")
+        self._require_no_trick()
+        self._require_not_fallen()
+
+        self._enqueue(FaceBallCmd())
+
+        return {"facing": True}
 
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""
