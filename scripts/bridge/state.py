@@ -28,6 +28,11 @@ RISE_SECONDS = 2.5
 # How long each episodic trick runs before control goes back to walking.
 ROLL_SECONDS = 2.0
 GET_UP_SECONDS = 3.0
+KICK_SECONDS = 2.0
+GROUND_PICK_SECONDS = 4.0
+
+# The feet a kick or a new ball can name.
+FEET = ("right", "left")
 
 # What /status reports while no trick is running.
 NO_TRICK = "none"
@@ -77,6 +82,13 @@ class TrickCmd:
 
 
 @dataclass(frozen=True)
+class BallCmd:
+    """Put the ball in front of one foot. Only a runner with a ball can act on it."""
+
+    foot: str
+
+
+@dataclass(frozen=True)
 class Trick:
     """One trick: the policy that runs it, how long it takes, what /status calls it."""
 
@@ -91,6 +103,9 @@ class Trick:
 TRICKS = {
     "roll": Trick("roulade_session", "roulade", ROLL_SECONDS, "rolling", "--roulade"),
     "get_up": Trick("standup_session", "standup", GET_UP_SECONDS, "getting_up", "--standup"),
+    "kick_right": Trick("kick_right_session", "kick_right", KICK_SECONDS, "kicking", "--kick-right"),
+    "kick_left": Trick("kick_left_session", "kick_left", KICK_SECONDS, "kicking", "--kick-left"),
+    "ground_pick": Trick("ground_pick_session", "ground_pick", GROUND_PICK_SECONDS, "picking", "--ground-pick"),
 }
 
 TRICK_NAMES = tuple(TRICKS)
@@ -115,8 +130,9 @@ ACTIONS = (
     ("shake", "gesture:shake"),
     ("sit", "sit_session"),
     ("stand up", "sit_session"),
-    ("pick up", "ground_pick_session"),
-    ("kick", "kick_session"),
+    ("ground pick", "ground_pick_session"),
+    ("kick right", "kick_right_session"),
+    ("kick left", "kick_left_session"),
     ("roulade", "roulade_session"),
     ("get up off the floor", "standup_session"),
 )
@@ -171,6 +187,14 @@ def policy_envelope(policy) -> Envelope:
         head_pitch_max=min(head_max, HEAD_PITCH_MAX),
         head_yaw_max=min(head_max, HEAD_YAW_MAX),
     )
+
+
+def _checked_foot(foot) -> str:
+    """The foot name as the API speaks it. Anything else is rejected."""
+    if foot not in FEET:
+        raise ValueError(f"unknown foot {foot!r}, expected one of {FEET}")
+
+    return foot
 
 
 def _clamp(value, low: float, high: float) -> float:
@@ -286,6 +310,22 @@ class BridgeState:
         self._enqueue(TrickCmd(name))
 
         return {"trick": name}
+
+    def submit_kick(self, foot="right") -> dict:
+        """Queue a kick with one foot. The ball is not checked: with no ball the kick swings at air."""
+        return self.submit_trick(f"kick_{_checked_foot(foot)}")
+
+    def submit_ball(self, foot="right") -> dict:
+        """Queue a new ball in front of one foot. That foot's kick policy is what proves a ball exists."""
+        self._note_request()
+
+        name = f"kick_{_checked_foot(foot)}"
+        self._require_trick_policy(name, TRICKS[name])
+        self._require_no_trick()
+
+        self._enqueue(BallCmd(foot))
+
+        return {"ball": foot}
 
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""
