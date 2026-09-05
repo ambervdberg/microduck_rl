@@ -427,3 +427,96 @@ def test_roll_and_get_up_are_registered_tools():
     names = [t.name for t in tools.ALL_TOOLS]
     assert "roll" in names
     assert "get_up" in names
+
+
+def _kicking():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "kicking"}
+
+
+def _picking():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "picking"}
+
+
+def test_kick_posts_the_foot_and_waits_until_the_trick_is_over(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_kicking(), _no_trick()])
+    try:
+        tools.kick.invoke({"foot": "left"})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/kick", "/status", "/status"]
+    assert _commands(received) == [("POST", "/kick", {"foot": "left"})]
+
+
+def test_kick_defaults_to_the_right_foot(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+    try:
+        tools.kick.invoke({})
+    finally:
+        server.shutdown()
+
+    assert _commands(received) == [("POST", "/kick", {"foot": "right"})]
+
+
+def test_kick_wait_gives_up_after_the_cap_from_the_kick_seconds(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_kicking()])
+    try:
+        tools.kick.invoke({})
+    finally:
+        server.shutdown()
+
+    cap = tools.KICK_SECONDS + tools.TRICK_WAIT_MARGIN_S
+    assert len(_polls(received)) == int(cap / tools.IDLE_POLL_S)
+
+
+def test_kick_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "sitting, stand up first"}))
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert "error" in result
+    assert _polls(received) == []
+
+
+def test_new_ball_posts_the_foot_and_does_not_wait(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+    try:
+        result = json.loads(tools.new_ball.invoke({"foot": "left"}))
+    finally:
+        server.shutdown()
+
+    assert _commands(received) == [("POST", "/ball", {"foot": "left"})]
+    assert _polls(received) == []
+    assert result["echo"] == {"foot": "left"}
+
+
+def test_ground_pick_posts_and_waits_until_the_trick_is_over(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_picking(), _picking(), _no_trick()])
+    try:
+        tools.ground_pick.invoke({})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/ground_pick", "/status", "/status", "/status"]
+    assert _commands(received) == [("POST", "/ground_pick", {})]
+
+
+def test_ground_pick_wait_gives_up_after_the_cap_from_its_seconds(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_picking()])
+    try:
+        tools.ground_pick.invoke({})
+    finally:
+        server.shutdown()
+
+    cap = tools.GROUND_PICK_SECONDS + tools.TRICK_WAIT_MARGIN_S
+    assert len(_polls(received)) == int(cap / tools.IDLE_POLL_S)
+
+
+def test_kick_new_ball_and_ground_pick_are_registered_tools():
+    names = [t.name for t in tools.ALL_TOOLS]
+    assert "kick" in names
+    assert "new_ball" in names
+    assert "ground_pick" in names
