@@ -6,7 +6,8 @@ a SkillRunner applies them to PolicyInference. Here ViewerCommander applies them
 command terms instead, once per policy step, and publishes the status the bridge serves on
 /status. During a ground pick the twist slots carry the phase encoding the policy was trained
 on. A follow reads the head camera every PICTURE_EVERY ticks and steers the head pose slots.
-A face writes the turn rate into the twist yaw slot with zero forward speed.
+A face steers the body on the ball's bearing, head yaw plus where the ball sits in the picture,
+and writes the turn rate into the twist yaw slot with zero forward speed.
 While the ball is out of view a face turns the body a full circle to look for it, then gives
 up and reports lost.
 """
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 import torch
 
 from bridge.ball_finder import BallSighting, find_ball
-from bridge.follower import BallFollower, BallHunt, BodyTurner
+from bridge.follower import BallFollower, BallHunt, BodyTurner, ball_bearing
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
@@ -310,7 +311,7 @@ class ViewerCommander:
         sighting = find_ball(self._picture())
         pitch, yaw = self._follower.update(sighting, self._head[HEAD_PITCH], self._head[HEAD_YAW])
         self._head = [0.0, pitch, yaw, 0.0]
-        self._turn_tick(yaw)
+        self._turn_tick(ball_bearing(yaw, sighting))
 
     def _picture(self):
         """The latest head camera picture as height by width by 3, on the CPU."""
@@ -348,26 +349,26 @@ class ViewerCommander:
         self._turn = 0.0
         self._hunt = None
 
-    def _turn_tick(self, yaw: float) -> None:
-        """Turn rate once per picture: toward the head while the ball is in view, the hunt while it is not."""
+    def _turn_tick(self, bearing: float) -> None:
+        """Turn rate once per picture: toward the ball while it is in view, the hunt while it is not."""
         if not self._facing:
             return
 
         if self._follower.searching:
-            self._turner.update(yaw, searching=True)
-            self._turn = self._hunt_tick(yaw)
+            self._turner.update(bearing, searching=True)
+            self._turn = self._hunt_tick(bearing)
             return
 
         if self._hunt is not None:
             self._hunt = None
             self._turner.engage()
 
-        self._turn = self._turner.update(yaw, searching=False)
+        self._turn = self._turner.update(bearing, searching=False)
 
-    def _hunt_tick(self, yaw: float) -> float:
-        """Turn the body the way the head looked when the ball went out of view. A full turn gives up."""
+    def _hunt_tick(self, bearing: float) -> float:
+        """Turn the body the way the ball last was. A full turn gives up."""
         if self._hunt is None:
-            self._hunt = BallHunt(direction=yaw)
+            self._hunt = BallHunt(direction=bearing)
 
         turn = self._hunt.update(self._body_yaw())
         if self._hunt.gave_up:

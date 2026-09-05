@@ -20,9 +20,11 @@ from bridge.follower import (
     SEARCH_PITCH,
     SEARCH_RATE,
     SEARCH_YAW_MAX,
+    TAN_HALF_WIDTH,
     BallFollower,
     BallHunt,
     BodyTurner,
+    ball_bearing,
 )
 from bridge.state import HEAD_PITCH_MAX, HEAD_YAW_MAX
 
@@ -237,3 +239,19 @@ def test_engage_ends_at_once_under_the_stop_yaw():
     turner.engage()
     assert turner.update(FACE_STOP / 2, searching=False) == 0.0
     assert turner.turning is False
+
+
+def test_the_bearing_is_the_head_yaw_when_nothing_is_seen():
+    assert ball_bearing(0.4, None) == 0.4
+
+
+def test_a_ball_in_the_middle_bears_where_the_head_looks():
+    assert ball_bearing(-0.3, BallSighting(0.0, 0.5, 10)) == -0.3
+
+
+def test_a_ball_at_the_right_edge_bears_a_half_width_to_the_right():
+    assert ball_bearing(0.0, BallSighting(1.0, 0.0, 10)) == pytest.approx(-math.atan(TAN_HALF_WIDTH))
+
+
+def test_the_half_width_matches_the_head_camera():
+    assert math.degrees(math.atan(TAN_HALF_WIDTH)) == pytest.approx(45.65, abs=0.05)

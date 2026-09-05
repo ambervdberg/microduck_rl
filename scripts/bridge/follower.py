@@ -4,7 +4,7 @@ Two states. Following: each picture nudges the head toward the ball and holds
 it at the middle. Searching, after LOST_AFTER_S without a ball: the head looks
 a bit down and sweeps left and right until the ball shows up again. No sim here.
 Head signs: positive pitch looks down, positive yaw looks left.
-BodyTurner turns the head yaw into a body turn rate for the face ball skill.
+BodyTurner turns the ball's bearing into a body turn rate for the face ball skill.
 BallHunt turns the body a full circle while the ball is out of view, then gives up.
 """
 
@@ -27,10 +27,22 @@ FACE_GAIN = 1.0       # rad/s of body turn per rad of head yaw
 HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
 HUNT_FULL_TURN = 2 * math.pi  # rad of body turn without a sighting, then the hunt gives up
 
+CAMERA_FOVY = 75.0           # deg, vertical field of view. Same as HEAD_CAMERA_CFG in viewer_bridge.py.
+CAMERA_ASPECT = 160 / 120    # picture width over height. Same as HEAD_CAMERA_CFG.
+TAN_HALF_WIDTH = math.tan(math.radians(CAMERA_FOVY / 2)) * CAMERA_ASPECT
+
 
 def wrap_angle(angle: float) -> float:
     """Into -pi..pi."""
     return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
+def ball_bearing(yaw: float, sighting: BallSighting | None) -> float:
+    """Angle from the body's forward direction to the ball, positive left. The head yaw when nothing is seen."""
+    if sighting is None:
+        return yaw
+
+    return yaw - math.atan(sighting.x * TAN_HALF_WIDTH)
 
 
 class BallFollower:
@@ -99,7 +111,7 @@ class BallFollower:
 
 
 class BodyTurner:
-    """Turn rate for the body from the commanded head yaw. Same sign: head left, body left."""
+    """Turn rate for the body from the ball's bearing. Same sign: ball left, body left."""
 
     def __init__(self, turn_max: float):
         self._turn_max = float(turn_max)
@@ -114,21 +126,21 @@ class BodyTurner:
         """Start turning now, whatever the head yaw. The turn still ends under FACE_STOP."""
         self._turning = True
 
-    def update(self, yaw: float, searching: bool) -> float:
-        """Turn rate in rad/s. Zero while searching, or while the head is near the middle."""
+    def update(self, bearing: float, searching: bool) -> float:
+        """Turn rate in rad/s. Zero while searching, or while the ball is near straight ahead."""
         if searching:
             self._turning = False
             return 0.0
 
-        if abs(yaw) >= FACE_START:
+        if abs(bearing) >= FACE_START:
             self._turning = True
-        elif abs(yaw) <= FACE_STOP:
+        elif abs(bearing) <= FACE_STOP:
             self._turning = False
 
         if not self._turning:
             return 0.0
 
-        return max(-self._turn_max, min(self._turn_max, FACE_GAIN * yaw))
+        return max(-self._turn_max, min(self._turn_max, FACE_GAIN * bearing))
 
 
 class BallHunt:

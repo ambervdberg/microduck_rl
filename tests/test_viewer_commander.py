@@ -10,7 +10,7 @@ import torch
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from bridge.follower import FACE_GAIN, FACE_START, FACE_STOP, HUNT_RATE, LOST_AFTER_S, SEARCH_PITCH
+from bridge.follower import FACE_GAIN, FACE_START, FACE_STOP, HUNT_RATE, LOST_AFTER_S, SEARCH_PITCH, TAN_HALF_WIDTH
 from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
@@ -894,8 +894,9 @@ def test_the_body_turns_right_once_the_head_looks_far_right():
     assert state.get_status()["turning"] is True
 
 
-def test_the_body_holds_while_the_head_is_under_the_stop_yaw():
-    env, state, commander = _facing_setup(col=100, row=60)
+def test_the_body_holds_while_the_ball_is_straight_ahead():
+    # Col 80 is the picture's true middle, bearing 0 rad. Col 120 sits at x 0.5, a 27 deg bearing.
+    env, state, commander = _facing_setup(col=80, row=60)
     _pictures(commander, 2)
     assert abs(_head(env)[HEAD_YAW]) < FACE_STOP
     assert _twist(env) == [0.0, 0.0, 0.0]
@@ -983,6 +984,11 @@ def _lose_the_ball(env, commander):
     _pictures(commander, 1)
 
 
+def _bearing_at_120(yaw):
+    """The bearing for a ball painted at column 120, x 0.5 of the picture's half width."""
+    return yaw - math.atan(0.5 * TAN_HALF_WIDTH)
+
+
 def _hunt_until_lost(env, commander):
     """Spin the fake body past a full turn with no ball in view."""
     robot = _TurningRobot()
@@ -1010,7 +1016,7 @@ def test_a_sighting_during_the_hunt_hands_back_to_the_turner():
     _pictures(commander, 1)
     yaw = _head(env)[HEAD_YAW]
     assert yaw < -FACE_START
-    assert _twist(env)[2] == pytest.approx(FACE_GAIN * yaw)
+    assert _twist(env)[2] == pytest.approx(FACE_GAIN * _bearing_at_120(yaw))
     assert state.get_status()["lost"] is False
 
 
@@ -1049,12 +1055,12 @@ def test_a_plain_follow_never_hunts():
     assert state.get_status()["lost"] is False
 
 
-def test_a_face_turns_from_a_head_yaw_between_stop_and_start():
-    env, state, commander = _facing_setup(col=150, row=60)
-    _pictures(commander, 2)
+def test_a_ball_a_little_to_the_right_turns_the_body_before_the_head_gets_there():
+    env, state, commander = _facing_setup(col=130, row=60)
+    _pictures(commander, 1)
     yaw = _head(env)[HEAD_YAW]
-    assert FACE_STOP < -yaw < FACE_START
-    assert _twist(env)[2] == pytest.approx(FACE_GAIN * yaw)
+    assert -FACE_STOP < yaw < 0.0
+    assert _twist(env)[2] < -FACE_START
     assert state.get_status()["turning"] is True
 
 
@@ -1066,4 +1072,4 @@ def test_the_handover_from_the_hunt_closes_the_last_bit():
     _pictures(commander, 1)
     yaw = _head(env)[HEAD_YAW]
     assert FACE_STOP < -yaw < FACE_START
-    assert _twist(env)[2] == pytest.approx(FACE_GAIN * yaw)
+    assert _twist(env)[2] == pytest.approx(FACE_GAIN * _bearing_at_120(yaw))
