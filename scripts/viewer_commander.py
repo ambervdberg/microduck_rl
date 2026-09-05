@@ -1,10 +1,11 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
 The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
-TrickCmd / BallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
-to PolicyInference. Here ViewerCommander applies them to the env's command terms
-instead, once per policy step, and publishes the status the bridge serves on /status.
-During a ground pick the twist slots carry the phase encoding the policy was trained on.
+TrickCmd / BallCmd / FollowBallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py
+a SkillRunner applies them to PolicyInference. Here ViewerCommander applies them to the env's
+command terms instead, once per policy step, and publishes the status the bridge serves on
+/status. During a ground pick the twist slots carry the phase encoding the policy was trained
+on. A follow reads the head camera every PICTURE_EVERY ticks and steers the head pose slots.
 """
 from __future__ import annotations
 
@@ -13,6 +14,8 @@ from dataclasses import dataclass, field
 
 import torch
 
+from bridge.ball_finder import BallSighting, find_ball
+from bridge.follower import BallFollower
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
@@ -20,6 +23,7 @@ from bridge.state import (
     TRICKS,
     BallCmd,
     BridgeState,
+    FollowBallCmd,
     GestureCmd,
     LookCmd,
     PostureCmd,
@@ -40,6 +44,9 @@ BODY_POSE_SLOTS = 6
 
 # Name of the head camera sensor, also its key in env.scene.
 HEAD_CAMERA = "head_camera"
+
+# Ticks between pictures: 10 pictures per second at the 50 Hz policy rate.
+PICTURE_EVERY = 5
 
 GESTURE_SECONDS = 1.6
 GESTURE_AMPLITUDE_RAD = 0.35
@@ -104,6 +111,9 @@ class ViewerCommander:
         self._trick: str | None = None
         self._trick_started = 0.0
         self._trick_until = 0.0
+        self._following = False
+        self._follower: BallFollower | None = None
+        self._ticks_since_picture = 0
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
@@ -123,6 +133,8 @@ class ViewerCommander:
 
         if self._watchdog.tick():
             self._release()
+
+        self._follow_tick()
 
         self._write_tensors()
         self._publish_status()
@@ -145,8 +157,10 @@ class ViewerCommander:
             self._walk(cmd)
         elif isinstance(cmd, LookCmd):
             self._gesture = None
+            self._stop_follow()
             self._head = [0.0, cmd.pitch, cmd.yaw, 0.0]
         elif isinstance(cmd, GestureCmd):
+            self._stop_follow()
             self._gesture = _Gesture(cmd.name, self._time)
         elif isinstance(cmd, PostureCmd):
             self._set_posture(cmd.sit)
@@ -154,6 +168,8 @@ class ViewerCommander:
             self._start_trick(cmd.name)
         elif isinstance(cmd, BallCmd):
             self._place_ball(cmd.foot)
+        elif isinstance(cmd, FollowBallCmd):
+            self._start_follow()
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
@@ -176,6 +192,7 @@ class ViewerCommander:
             self._posture = "sitting"
             self._twist = [0.0, 0.0, 0.0]
             self._walk_until = 0.0
+            self._stop_follow()
             return
 
         if self._posture == "sitting":
@@ -216,19 +233,20 @@ class ViewerCommander:
         return TRICKS[self._trick].status
 
     def _release(self) -> None:
-        """The brain went quiet: zero the twist and, unless a gesture is playing, the head."""
+        """The brain went quiet: zero the twist and, unless a gesture or a follow runs, the head."""
         self._twist = [0.0, 0.0, 0.0]
         self._walk_until = 0.0
 
-        if self._gesture is None:
+        if self._gesture is None and not self._following:
             self._head = [0.0, 0.0, 0.0, 0.0]
 
     def _clear_commands(self) -> None:
-        """Zero the twist, the head, the gesture and the walk countdown."""
+        """Zero the twist, the head, the gesture, the walk countdown and any follow."""
         self._twist = [0.0, 0.0, 0.0]
         self._head = [0.0, 0.0, 0.0, 0.0]
         self._gesture = None
         self._walk_until = 0.0
+        self._stop_follow()
 
     # Ball.
 
@@ -246,6 +264,56 @@ class ViewerCommander:
         ball = self._env.scene["ball"]
         ball.write_root_link_pose_to_sim(pose)
         ball.write_root_link_velocity_to_sim(torch.zeros(1, 6, device=self._env.device))
+
+    # Follow ball.
+
+    def _start_follow(self) -> None:
+        """The head camera takes over the head. The follower runs at picture rate."""
+        self._gesture = None
+        self._follower = BallFollower(PICTURE_EVERY * self._dt)
+        self._following = True
+        self._ticks_since_picture = 0
+
+    def _stop_follow(self) -> None:
+        """Drop the follower. The head stays where it is until the next command."""
+        self._following = False
+        self._follower = None
+
+    def _follow_tick(self) -> None:
+        """Every PICTURE_EVERY ticks: read the picture, find the ball, move the head toward it."""
+        if not self._following or self._is_fallen():
+            return
+
+        self._ticks_since_picture += 1
+        if self._ticks_since_picture < PICTURE_EVERY:
+            return
+
+        self._ticks_since_picture = 0
+        sighting = find_ball(self._picture())
+        pitch, yaw = self._follower.update(sighting, self._head[HEAD_PITCH], self._head[HEAD_YAW])
+        self._head = [0.0, pitch, yaw, 0.0]
+
+    def _picture(self):
+        """The latest head camera picture as height by width by 3, on the CPU."""
+        return self._env.scene[HEAD_CAMERA].data.rgb[0].cpu().numpy()
+
+    def _sighting(self) -> BallSighting | None:
+        """The ball as of the last picture, or None."""
+        if self._follower is None:
+            return None
+
+        return self._follower.sighting
+
+    def _ball_status(self) -> dict | None:
+        """The latest sighting as x, y and size for /status, or None."""
+        sighting = self._sighting()
+        if sighting is None:
+            return None
+
+        return {"x": round(sighting.x, 3), "y": round(sighting.y, 3), "size": sighting.size}
+
+    def _searching(self) -> bool:
+        return self._follower is not None and self._follower.searching
 
     # Tensors.
 
@@ -348,5 +416,9 @@ class ViewerCommander:
             "posture": self._posture,
             "trick": self._trick_status(),
             "fallen": self._is_fallen(),
+            "following": self._following,
+            "ball_seen": self._sighting() is not None,
+            "ball": self._ball_status(),
+            "searching": self._searching(),
             "actions": dict(self._actions),
         })
