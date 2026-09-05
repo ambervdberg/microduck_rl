@@ -28,7 +28,6 @@ from bridge.state import (  # noqa: E402
     TRICKS,
     WALK_DEFAULT_S,
     WALK_MAX_S,
-    FEET,
     BallCmd,
     BridgeState,
     GestureCmd,
