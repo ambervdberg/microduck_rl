@@ -19,7 +19,7 @@ SEARCH_RATE = 1.0     # rad/s of sweep
 
 FACE_START = 0.3      # rad of head yaw that starts a body turn
 FACE_STOP = 0.1       # rad of head yaw that ends it, the gap stops flip-flopping
-FACE_GAIN = 1.5       # rad/s of body turn per rad of head yaw
+FACE_GAIN = 1.0       # rad/s of body turn per rad of head yaw
 
 
 class BallFollower:
