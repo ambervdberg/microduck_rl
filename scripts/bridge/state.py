@@ -28,7 +28,7 @@ RISE_SECONDS = 2.5
 # How long each episodic trick runs before control goes back to walking.
 ROLL_SECONDS = 2.0
 GET_UP_SECONDS = 3.0
-KICK_SECONDS = 2.0
+KICK_SECONDS = 1.5
 GROUND_PICK_SECONDS = 4.0
 
 # The feet a kick or a new ball can name.
