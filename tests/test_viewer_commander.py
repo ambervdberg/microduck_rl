@@ -895,7 +895,7 @@ def test_the_body_turns_right_once_the_head_looks_far_right():
 
 
 def test_the_body_holds_while_the_ball_is_straight_ahead():
-    # Col 80 is the picture's true middle, bearing 0 rad. Col 120 sits at x 0.5, a 27 deg bearing.
+    # Col 80 is the picture's true middle, so the bearing here is 0 rad.
     env, state, commander = _facing_setup(col=80, row=60)
     _pictures(commander, 2)
     assert abs(_head(env)[HEAD_YAW]) < FACE_STOP
@@ -984,9 +984,10 @@ def _lose_the_ball(env, commander):
     _pictures(commander, 1)
 
 
-def _bearing_at_120(yaw):
-    """The bearing for a ball painted at column 120, x 0.5 of the picture's half width."""
-    return yaw - math.atan(0.5 * TAN_HALF_WIDTH)
+def _bearing_at(col, yaw):
+    """The bearing for a ball painted at this column, given the head yaw after that picture."""
+    x = col / 80 - 1
+    return yaw - math.atan(x * TAN_HALF_WIDTH)
 
 
 def _hunt_until_lost(env, commander):
@@ -1009,14 +1010,17 @@ def test_a_lost_ball_turns_the_body_the_way_the_head_looked():
 
 
 def test_a_sighting_during_the_hunt_hands_back_to_the_turner():
+    # Col 36 puts the bearing inside the FACE_STOP..FACE_START gap: without the handover's
+    # engage() call the turner would stay off here, so this proves engage() ran.
     env, state, commander = _facing_setup(col=156, row=60)
     _turn_head_past_start(commander)
     _lose_the_ball(env, commander)
-    env.scene["head_camera"].paint(120, 60)
+    env.scene["head_camera"].paint(36, 60)
     _pictures(commander, 1)
     yaw = _head(env)[HEAD_YAW]
-    assert yaw < -FACE_START
-    assert _twist(env)[2] == pytest.approx(FACE_GAIN * _bearing_at_120(yaw))
+    bearing = _bearing_at(36, yaw)
+    assert FACE_STOP < abs(bearing) < FACE_START
+    assert _twist(env)[2] == pytest.approx(FACE_GAIN * bearing)
     assert state.get_status()["lost"] is False
 
 
@@ -1065,11 +1069,13 @@ def test_a_ball_a_little_to_the_right_turns_the_body_before_the_head_gets_there(
 
 
 def test_the_handover_from_the_hunt_closes_the_last_bit():
+    # Col 60 puts the bearing inside the FACE_STOP..FACE_START gap, same reason as above.
     env, _state, commander = _facing_setup(col=156, row=60)
     _pictures(commander, 2)
     _lose_the_ball(env, commander)
-    env.scene["head_camera"].paint(120, 60)
+    env.scene["head_camera"].paint(60, 60)
     _pictures(commander, 1)
     yaw = _head(env)[HEAD_YAW]
-    assert FACE_STOP < -yaw < FACE_START
-    assert _twist(env)[2] == pytest.approx(FACE_GAIN * _bearing_at_120(yaw))
+    bearing = _bearing_at(60, yaw)
+    assert FACE_STOP < abs(bearing) < FACE_START
+    assert _twist(env)[2] == pytest.approx(FACE_GAIN * bearing)

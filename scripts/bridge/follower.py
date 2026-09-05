@@ -20,9 +20,9 @@ SEARCH_PITCH = 0.3    # rad down while searching, where a ball on the floor woul
 SEARCH_YAW_MAX = 1.2  # rad, the sweep turns around here
 SEARCH_RATE = 1.0     # rad/s of sweep
 
-FACE_START = 0.3      # rad of head yaw that starts a body turn
-FACE_STOP = 0.1       # rad of head yaw that ends it, the gap stops flip-flopping
-FACE_GAIN = 1.0       # rad/s of body turn per rad of head yaw
+FACE_START = 0.3      # rad of ball bearing that starts a body turn
+FACE_STOP = 0.1       # rad of ball bearing that ends it, the gap stops flip-flopping
+FACE_GAIN = 1.0       # rad/s of body turn per rad of ball bearing
 
 HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
 HUNT_FULL_TURN = 2 * math.pi  # rad of body turn without a sighting, then the hunt gives up
@@ -119,11 +119,11 @@ class BodyTurner:
 
     @property
     def turning(self) -> bool:
-        """True while the body is catching up with the head."""
+        """True while the body is catching up with the ball's bearing."""
         return self._turning
 
     def engage(self) -> None:
-        """Start turning now, whatever the head yaw. The turn still ends under FACE_STOP."""
+        """Start turning now, whatever the bearing. The turn still ends under FACE_STOP."""
         self._turning = True
 
     def update(self, bearing: float, searching: bool) -> float:
