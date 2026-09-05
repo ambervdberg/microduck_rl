@@ -6,6 +6,7 @@ a bit down and sweeps left and right until the ball shows up again. No sim here.
 Head signs: positive pitch looks down, positive yaw looks left.
 BodyTurner turns the ball's bearing into a body turn rate for the face ball skill.
 BallHunt turns the body a full circle while the ball is out of view, then gives up.
+BallApproach picks the forward speed for the go to ball skill and says when the robot is there.
 """
 
 import math
@@ -24,6 +25,11 @@ FACE_START = 0.3      # rad of ball bearing that starts a body turn
 FACE_STOP = 0.1       # rad of ball bearing that ends it, the gap stops flip-flopping
 FACE_GAIN = 1.0       # rad/s of body turn per rad of ball bearing
 FACE_TURN_MIN = 0.3   # rad/s, the smallest turn the walk policy actually makes
+
+APPROACH_SPEED = 0.15  # m/s, the slow walk that is measured to work
+ARRIVE_PITCH = 0.73    # rad of head pitch with the ball one foot length ahead, measured in sim
+ARRIVE_SIZE = 580      # orange pixels at that distance, the backup when the pitch cap comes first
+GIVE_UP_S = 20.0       # walking longer than this means the ball is not reachable
 
 HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
 HUNT_FULL_TURN = 2 * math.pi  # rad of body turn without a sighting, then the hunt gives up
@@ -176,3 +182,38 @@ class BallHunt:
             return 0.0
 
         return self._direction * HUNT_RATE
+
+
+class BallApproach:
+    """Forward speed toward the ball. Arrived and gave up are final until a new approach starts."""
+
+    def __init__(self, dt: float):
+        self._give_up_after = int(round(GIVE_UP_S / float(dt)))
+        self._updates = 0
+        self.state = "lost"
+
+    def update(self, sighting, pitch: float, searching: bool, turning: bool) -> float:
+        """Speed to walk at until the next picture."""
+        if self.state in ("arrived", "gave_up"):
+            return 0.0
+
+        self._updates += 1
+
+        if self._updates >= self._give_up_after:
+            self.state = "gave_up"
+            return 0.0
+
+        if sighting is None or searching:
+            self.state = "lost"
+            return 0.0
+
+        if pitch >= ARRIVE_PITCH or sighting.size >= ARRIVE_SIZE:
+            self.state = "arrived"
+            return 0.0
+
+        if turning:
+            self.state = "turning"
+            return 0.0
+
+        self.state = "walking"
+        return APPROACH_SPEED

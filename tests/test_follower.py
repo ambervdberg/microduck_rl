@@ -10,18 +10,23 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from bridge.ball_finder import BallSighting
 from bridge.follower import (
+    APPROACH_SPEED,
+    ARRIVE_PITCH,
+    ARRIVE_SIZE,
     DEAD_BAND,
     FACE_GAIN,
     FACE_START,
     FACE_STOP,
     FACE_TURN_MIN,
     GAIN,
+    GIVE_UP_S,
     HUNT_RATE,
     LOST_AFTER_S,
     SEARCH_PITCH,
     SEARCH_RATE,
     SEARCH_YAW_MAX,
     TAN_HALF_WIDTH,
+    BallApproach,
     BallFollower,
     BallHunt,
     BodyTurner,
@@ -273,3 +278,59 @@ def test_the_minimum_turn_is_inside_the_cap():
     turner = BodyTurner(0.2)
     turner.engage()
     assert turner.update(0.2, searching=False) == 0.2
+
+
+GIVE_UP_UPDATES = int(round(GIVE_UP_S / DT))
+
+
+def _approach():
+    return BallApproach(DT)
+
+
+def test_a_seen_ball_ahead_means_walk():
+    approach = _approach()
+    assert approach.update(_seen(), 0.2, searching=False, turning=False) == APPROACH_SPEED
+    assert approach.state == "walking"
+
+
+def test_turning_holds_the_walk():
+    approach = _approach()
+    assert approach.update(_seen(), 0.2, searching=False, turning=True) == 0.0
+    assert approach.state == "turning"
+
+
+def test_searching_holds_the_walk():
+    approach = _approach()
+    assert approach.update(None, 0.2, searching=True, turning=False) == 0.0
+    assert approach.state == "lost"
+
+
+def test_a_short_loss_holds_the_walk_too():
+    approach = _approach()
+    assert approach.update(None, 0.2, searching=False, turning=False) == 0.0
+    assert approach.state == "lost"
+
+
+def test_the_stop_pitch_means_arrived_and_stays_arrived():
+    approach = _approach()
+    assert approach.update(_seen(), ARRIVE_PITCH, searching=False, turning=False) == 0.0
+    assert approach.state == "arrived"
+    assert approach.update(_seen(), 0.1, searching=False, turning=False) == 0.0
+    assert approach.state == "arrived"
+
+
+def test_a_big_ball_means_arrived_before_the_pitch_cap():
+    approach = _approach()
+    assert approach.update(_seen(size=ARRIVE_SIZE), 0.2, searching=False, turning=False) == 0.0
+    assert approach.state == "arrived"
+
+
+def test_give_up_after_the_timeout():
+    approach = _approach()
+    for _ in range(GIVE_UP_UPDATES - 1):
+        approach.update(_seen(), 0.2, searching=False, turning=False)
+    assert approach.state == "walking"
+    assert approach.update(_seen(), 0.2, searching=False, turning=False) == 0.0
+    assert approach.state == "gave_up"
+    assert approach.update(_seen(), ARRIVE_PITCH, searching=False, turning=False) == 0.0
+    assert approach.state == "gave_up"
