@@ -334,16 +334,18 @@ def face_ball() -> str:
     turns a full circle to look for it. If the reply has lost true, the ball
     was not found anywhere and the robot stopped, tell the user so.
     """
-    return _with_lost(_post_and_watch("/face_ball", "turning", False, FACE_MAX_WAIT_S))
+    return _with_face_outcome(_post_and_watch("/face_ball", "turning", False, FACE_MAX_WAIT_S))
 
 
-def _with_lost(reply: str) -> str:
-    """Add the bridge's lost flag to a face reply. Errors pass through."""
+def _with_face_outcome(reply: str) -> str:
+    """Add the bridge's lost and turning flags to a face reply. Errors pass through."""
     echo = json.loads(reply)
     if "error" in echo:
         return reply
 
-    echo["lost"] = bool(json.loads(_get("/status")).get("lost", False))
+    status = json.loads(_get("/status"))
+    echo["lost"] = bool(status.get("lost", False))
+    echo["turning"] = bool(status.get("turning", False))
 
     return json.dumps(echo)
 

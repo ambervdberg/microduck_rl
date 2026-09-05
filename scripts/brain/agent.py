@@ -31,6 +31,7 @@ It can keep the ball in view with its head with follow_ball, which stays on
 until stop, sit, look, a gesture or a trick. Status says ball_seen.
 face_ball turns the body until the ball is straight ahead and returns when it is.
 If face_ball comes back with lost true, say that the ball could not be found.
+If face_ball comes back with turning true, the turn did not finish in time, say so.
 Answer briefly after acting."""
 
 

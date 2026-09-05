@@ -583,6 +583,19 @@ def test_face_ball_reports_a_lost_ball(monkeypatch):
         server.shutdown()
 
     assert result["lost"] is True
+    assert result["turning"] is False
+
+
+def test_face_ball_reports_an_unfinished_turn(monkeypatch):
+    monkeypatch.setattr(tools, "FACE_MAX_WAIT_S", 0.5)
+    received, server = _scripted_bridge(monkeypatch, [_turning()])
+    try:
+        result = json.loads(tools.face_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["turning"] is True
+    assert result["lost"] is False
 
 
 def test_face_ball_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
