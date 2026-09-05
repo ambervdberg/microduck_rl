@@ -1131,6 +1131,10 @@ def test_go_to_ball_is_offered_only_with_a_camera():
     commander.tick()
     assert state.get_status()["actions"]["go to ball"] is True
 
+    _env, state, commander = _setup(kick_right=True)
+    commander.tick()
+    assert state.get_status()["actions"]["go to ball"] is False
+
 
 def test_going_starts_the_face_and_the_follow():
     _env, state, commander = _going_setup()
@@ -1236,4 +1240,26 @@ def test_the_watchdog_ends_the_approach_and_keeps_the_follow():
     status = state.peek_status()
     assert status["approach"] == "none"
     assert status["following"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_arrival_zeroes_the_turn_in_the_same_picture():
+    # The turner is latched and turning at arrival, row 118 crosses ARRIVE_PITCH on the 8th picture.
+    env, state, commander = _going_setup(col=100, row=118)
+    _pictures(commander, 8)
+    status = state.get_status()
+    assert status["at_ball"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_hunt_that_gives_up_ends_the_approach_with_lost():
+    env, state, commander = _going_setup(col=156, row=60)
+    _pictures(commander, 4)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    status = state.get_status()
+    assert status["approach"] == "none"
+    assert status["lost"] is True
+    assert status["at_ball"] is False
+    assert status["facing"] is False
     assert _twist(env) == [0.0, 0.0, 0.0]

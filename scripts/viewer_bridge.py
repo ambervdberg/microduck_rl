@@ -8,8 +8,8 @@
 
 Then open http://localhost:8632 for the viewer. The bridge listens on 127.0.0.1:<bridge-port>
 with the same routes infer_policy.py --bridge serves (/walk, /look, /gesture, /sit, /stand,
-/roll, /get_up, /kick, /ball, /ground_pick, /follow_ball, /stop, /reset, /status), so scripts/brain
-works unchanged.
+/roll, /get_up, /kick, /ball, /ground_pick, /follow_ball, /face_ball, /go_to_ball, /stop, /reset,
+/status), so scripts/brain works unchanged.
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kick-left", help="ONNX left foot kick policy, unlocks /kick and /ball for that foot")
     parser.add_argument("--ground-pick", help="ONNX ground pick policy, unlocks /ground_pick")
     parser.add_argument("--follow-ball", action="store_true",
-                        help="render a head camera, unlocks /follow_ball, brings its own ball")
+                        help="render a head camera, unlocks follow, face and go to ball, brings its own ball")
     parser.add_argument("--bridge-port", type=int, default=8630)
     parser.add_argument("--viewer-port", type=int, default=8632)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")

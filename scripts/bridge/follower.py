@@ -27,8 +27,8 @@ FACE_GAIN = 1.0       # rad/s of body turn per rad of ball bearing
 FACE_TURN_MIN = 0.3   # rad/s, the smallest turn the walk policy actually makes
 
 APPROACH_SPEED = 0.15  # m/s, the slow walk that is measured to work
-ARRIVE_PITCH = 1.05    # rad of head pitch with the ball about 0.10 m ahead of the trunk, where a kick reaches
-ARRIVE_SIZE = 1100     # orange pixels at that distance, the backup when the pitch cap comes first
+ARRIVE_PITCH = 1.05    # rad of head pitch with the ball about 0.10 m ahead, where a kick reaches, measured in sim
+ARRIVE_SIZE = 1100     # orange pixels in the 160 by 120 picture at that distance, the backup when the pitch cap comes first
 GIVE_UP_S = 20.0       # walking longer than this means the ball is not reachable
 
 HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
@@ -192,7 +192,7 @@ class BallApproach:
         self._updates = 0
         self.state = "lost"
 
-    def update(self, sighting, pitch: float, searching: bool, turning: bool) -> float:
+    def update(self, sighting: BallSighting | None, pitch: float, searching: bool, turning: bool) -> float:
         """Speed to walk at until the next picture."""
         if self.state in ("arrived", "gave_up"):
             return 0.0

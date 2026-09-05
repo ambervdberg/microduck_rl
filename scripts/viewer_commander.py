@@ -354,7 +354,7 @@ class ViewerCommander:
         self._facing = True
 
     def _stop_face(self) -> None:
-        """Stop turning. The follow, if any, goes on."""
+        """Stop turning and end any approach. The follow, if any, goes on."""
         self._approach = None
         self._speed = 0.0
         self._facing = False
@@ -414,12 +414,15 @@ class ViewerCommander:
         self._start_face()
         self._approach = BallApproach(PICTURE_EVERY * self._dt)
 
-    def _approach_tick(self, sighting, pitch: float) -> None:
-        """Forward speed from the approach rule, once per picture."""
+    def _approach_tick(self, sighting: BallSighting | None, pitch: float) -> None:
+        """Forward speed from the approach rule, once per picture. Zeroes the turn at arrival."""
         if self._approach is None:
             return
 
         self._speed = self._approach.update(sighting, pitch, self._follower.searching, self._turning())
+
+        if self._at_ball():
+            self._turn = 0.0
 
     def _approach_status(self) -> str:
         """The approach state for /status, or "none" when no approach runs."""
