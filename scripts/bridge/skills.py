@@ -11,12 +11,14 @@ from bridge.state import (
     NO_TRICK,
     RISE_SECONDS,
     TRICKS,
+    BallCmd,
     BridgeState,
     GestureCmd,
     LookCmd,
     PostureCmd,
     ResetCmd,
     StopCmd,
+    Trick,
     TrickCmd,
     WalkCmd,
     available_actions,
@@ -54,6 +56,7 @@ class SkillRunner:
             GestureCmd: self._gesture,
             PostureCmd: self._posture,
             TrickCmd: self._trick,
+            BallCmd: self._ball,
         }
 
     def tick(self, policy_enabled: bool = True) -> None:
@@ -129,9 +132,21 @@ class SkillRunner:
         trick = TRICKS[cmd.name]
 
         self._stop_walking()
-        self._policy.trigger_behavior(trick.behavior)
+        self._start_behavior(cmd.name, trick)
         self._trick_name = trick.status
         self._trick_seconds_left = trick.seconds
+
+    def _start_behavior(self, name: str, trick: Trick) -> None:
+        """The ground pick runs its own phase clock. Every other trick is a plain session swap."""
+        if name == "ground_pick":
+            self._policy.trigger_ground_pick()
+            return
+
+        self._policy.trigger_behavior(trick.behavior)
+
+    def _ball(self, cmd: BallCmd) -> None:
+        """Put the ball in front of one foot. The runner does the teleport, or says there is no ball."""
+        self._policy._place_ball(f"kick_{cmd.foot}")
 
     def trick_name(self) -> str:
         """The running trick under the name /status speaks, or "none"."""

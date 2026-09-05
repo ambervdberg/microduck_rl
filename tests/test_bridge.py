@@ -984,6 +984,52 @@ class TestSkillsTrick:
         _tick_seconds(runner, ROLL_SECONDS + 1.0, policy_enabled=False)
         assert state.get_status()["trick"] == "rolling"
 
+    def test_kick_starts_its_behavior_and_reports_kicking(self):
+        state, policy = _pair(kick_right=True, kick_left=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_kick("left")
+        runner.tick()
+        assert policy.behaviors == ["kick_left"]
+        assert state.get_status()["trick"] == "kicking"
+
+    def test_kick_returns_to_none_after_kick_seconds(self):
+        state, policy = _pair(kick_right=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_kick("right")
+        runner.tick()
+        # KICK_SECONDS is an exact multiple of CONTROL_DT, so a one-tick margin
+        # keeps this check off the exact expiry boundary.
+        _tick_seconds(runner, KICK_SECONDS - 2 * CONTROL_DT)
+        assert state.get_status()["trick"] == "kicking"
+        _tick_seconds(runner, 2 * CONTROL_DT)
+        assert state.get_status()["trick"] == "none"
+
+    def test_ground_pick_starts_the_phase_runner_and_reports_picking(self):
+        state, policy = _pair(ground_pick=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_ground_pick()
+        runner.tick()
+        assert policy.ground_picks == 1
+        assert policy.behaviors == []
+        assert state.get_status()["trick"] == "picking"
+        assert state.get_status()["policy"] == "ground_pick"
+
+    def test_ground_pick_returns_to_none_after_its_cycle(self):
+        state, policy = _pair(ground_pick=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_ground_pick()
+        runner.tick()
+        _tick_seconds(runner, GROUND_PICK_SECONDS + CONTROL_DT)
+        assert state.get_status()["trick"] == "none"
+
+    def test_new_ball_reaches_the_runner_for_that_foot(self):
+        state, policy = _pair(kick_right=True, kick_left=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_ball("left")
+        runner.tick()
+        assert policy.balls == ["kick_left"]
+        assert state.get_status()["trick"] == "none"
+
 
 def _post(url, body):
     req = urllib.request.Request(
