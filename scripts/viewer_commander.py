@@ -160,6 +160,8 @@ class ViewerCommander:
             self._stop_follow()
             self._head = [0.0, cmd.pitch, cmd.yaw, 0.0]
         elif isinstance(cmd, GestureCmd):
+            if self._following:
+                self._head = [0.0, 0.0, 0.0, 0.0]
             self._stop_follow()
             self._gesture = _Gesture(cmd.name, self._time)
         elif isinstance(cmd, PostureCmd):

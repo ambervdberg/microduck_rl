@@ -784,6 +784,16 @@ def test_a_gesture_ends_the_follow():
     assert state.get_status()["following"] is False
 
 
+def test_a_gesture_after_a_follow_starts_from_home():
+    env, state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_YAW] != 0.0
+
+    state.submit_gesture("nod")
+    commander.tick()
+    assert _head(env)[HEAD_YAW] == 0.0
+
+
 def test_a_sit_ends_the_follow():
     _env, state, commander = _setup(sit_session=True, kick_right=True, camera=True)
     state.submit_follow_ball()
