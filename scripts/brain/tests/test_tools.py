@@ -520,3 +520,19 @@ def test_kick_new_ball_and_ground_pick_are_registered_tools():
     assert "kick" in names
     assert "new_ball" in names
     assert "ground_pick" in names
+
+
+def test_follow_ball_posts_and_does_not_wait(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+    try:
+        result = json.loads(tools.follow_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert _commands(received) == [("POST", "/follow_ball", {})]
+    assert _polls(received) == []
+    assert result["echo"] == {}
+
+
+def test_follow_ball_is_a_registered_tool():
+    assert "follow_ball" in [t.name for t in tools.ALL_TOOLS]

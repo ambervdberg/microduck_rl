@@ -27,6 +27,8 @@ fall. Leaving a sit is stand_up, not get_up.
 It can kick a ball with either foot. A kick never places a ball. Call
 new_ball only when the user asks for a new ball.
 It can also bow its beak to the floor and back up with ground_pick.
+It can keep the ball in view with its head with follow_ball, which stays on
+until stop, sit, look or a trick. Status says ball_seen.
 Answer briefly after acting."""
 
 

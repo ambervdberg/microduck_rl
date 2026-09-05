@@ -312,9 +312,20 @@ def ground_pick() -> str:
 
 
 @tool
+def follow_ball() -> str:
+    """Turn the head to keep the ball in view. Returns at once, the follow keeps running.
+
+    It stays on until stop, sit, look, a gesture or a trick. When the ball is out
+    of view the head sweeps left and right until it shows up again. Walking is
+    allowed while following. Read status for ball_seen to answer "do you see it".
+    """
+    return _post("/follow_ball", {})
+
+
+@tool
 def status() -> str:
     """Current robot state: active policy, speeds, head pose, fallen or not."""
     return _get("/status")
 
 
-ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, status]
+ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, follow_ball, status]
