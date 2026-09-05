@@ -82,6 +82,9 @@ GROUND_PICK_SECONDS = 4.0
 # Extra wait on top of the trick seconds. Sim time in the viewer runs slower than wall time.
 TRICK_WAIT_MARGIN_S = 4.0
 
+# Wait cap for a face: a half turn at the capped rate plus the slow viewer.
+FACE_MAX_WAIT_S = 8.0
+
 # What /status reports while no trick is running.
 NO_TRICK = "none"
 
@@ -134,7 +137,7 @@ def _wait_until_idle(max_wait_s: float) -> None:
             return
 
 
-def _wait_for_status(field: str, target: str, max_wait_s: float) -> None:
+def _wait_for_status(field: str, target: str | bool, max_wait_s: float) -> None:
     """Block until a status field reaches its target, or the wait cap passes.
 
     The start window comes first: a stale snapshot from before the sim drained
@@ -174,7 +177,7 @@ def _post_and_wait(path: str, body: dict, max_wait) -> str:
     return reply
 
 
-def _post_and_watch(path: str, field: str, target: str, max_wait_s: float, settle_s: float = 0.0,
+def _post_and_watch(path: str, field: str, target: str | bool, max_wait_s: float, settle_s: float = 0.0,
                     body: dict | None = None) -> str:
     """POST a command, then wait for a status field to reach its target. Errors return at once.
 
@@ -323,9 +326,23 @@ def follow_ball() -> str:
 
 
 @tool
+def face_ball() -> str:
+    """Turn on the spot until the ball is straight ahead. Returns once the body stops turning.
+
+    Starts follow_ball too, so the head keeps the ball in view afterwards. The
+    robot must be standing and free. While the ball is out of view only the
+    head searches, the body waits.
+    """
+    return _post_and_watch("/face_ball", "turning", False, FACE_MAX_WAIT_S)
+
+
+@tool
 def status() -> str:
     """Current robot state: active policy, speeds, head pose, fallen or not."""
     return _get("/status")
 
 
-ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, follow_ball, status]
+ALL_TOOLS = [
+    walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, follow_ball, face_ball,
+    status,
+]

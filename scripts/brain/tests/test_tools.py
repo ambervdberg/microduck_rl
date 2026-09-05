@@ -536,3 +536,48 @@ def test_follow_ball_posts_and_does_not_wait(monkeypatch):
 
 def test_follow_ball_is_a_registered_tool():
     assert "follow_ball" in [t.name for t in tools.ALL_TOOLS]
+
+
+def _turning():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": True}
+
+
+def _faced():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": False}
+
+
+def test_face_ball_posts_and_waits_until_the_body_stops_turning(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_turning(), _turning(), _faced()])
+    try:
+        tools.face_ball.invoke({})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/face_ball", "/status", "/status", "/status"]
+    assert _commands(received) == [("POST", "/face_ball", {})]
+
+
+def test_face_ball_wait_gives_up_after_its_cap(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_turning()])
+    try:
+        tools.face_ball.invoke({})
+    finally:
+        server.shutdown()
+
+    assert len(_polls(received)) == int(tools.FACE_MAX_WAIT_S / tools.IDLE_POLL_S)
+
+
+def test_face_ball_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_faced()])
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "no head camera"}))
+    try:
+        result = json.loads(tools.face_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert "error" in result
+    assert _polls(received) == []
+
+
+def test_face_ball_is_a_registered_tool():
+    assert "face_ball" in [t.name for t in tools.ALL_TOOLS]
