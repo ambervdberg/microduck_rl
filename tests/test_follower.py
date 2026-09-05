@@ -10,12 +10,16 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 from bridge.ball_finder import BallSighting
 from bridge.follower import (
     DEAD_BAND,
+    FACE_GAIN,
+    FACE_START,
+    FACE_STOP,
     GAIN,
     LOST_AFTER_S,
     SEARCH_PITCH,
     SEARCH_RATE,
     SEARCH_YAW_MAX,
     BallFollower,
+    BodyTurner,
 )
 from bridge.state import HEAD_PITCH_MAX, HEAD_YAW_MAX
 
@@ -124,3 +128,56 @@ def test_the_last_sighting_is_kept_and_cleared():
     assert follower.sighting == _seen(x=0.1)
     follower.update(None, 0.0, 0.0)
     assert follower.sighting is None
+
+
+TURN_MAX = 1.0
+
+
+def test_a_small_head_yaw_asks_for_no_turn():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(FACE_STOP / 2, searching=False) == 0.0
+    assert turner.turning is False
+
+
+def test_a_head_far_to_the_left_turns_the_body_left():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(0.5, searching=False) == pytest.approx(FACE_GAIN * 0.5)
+    assert turner.turning is True
+
+
+def test_a_head_far_to_the_right_turns_the_body_right():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(-0.5, searching=False) == pytest.approx(-FACE_GAIN * 0.5)
+
+
+def test_the_turn_stays_under_the_cap():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(1.4, searching=False) == TURN_MAX
+    assert turner.update(-1.4, searching=False) == -TURN_MAX
+
+
+def test_the_turn_keeps_going_between_start_and_stop():
+    turner = BodyTurner(TURN_MAX)
+    turner.update(FACE_START + 0.05, searching=False)
+    assert turner.update(0.2, searching=False) == pytest.approx(FACE_GAIN * 0.2)
+    assert turner.turning is True
+
+
+def test_the_turn_ends_under_the_stop_yaw():
+    turner = BodyTurner(TURN_MAX)
+    turner.update(0.5, searching=False)
+    assert turner.update(FACE_STOP - 0.01, searching=False) == 0.0
+    assert turner.turning is False
+
+
+def test_a_turn_does_not_start_between_stop_and_start():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(0.2, searching=False) == 0.0
+    assert turner.turning is False
+
+
+def test_searching_holds_the_body_still():
+    turner = BodyTurner(TURN_MAX)
+    turner.update(0.5, searching=False)
+    assert turner.update(1.0, searching=True) == 0.0
+    assert turner.turning is False

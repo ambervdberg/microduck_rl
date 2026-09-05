@@ -4,6 +4,7 @@ Two states. Following: each picture nudges the head toward the ball and holds
 it at the middle. Searching, after LOST_AFTER_S without a ball: the head looks
 a bit down and sweeps left and right until the ball shows up again. No sim here.
 Head signs: positive pitch looks down, positive yaw looks left.
+BodyTurner turns the head yaw into a body turn rate for the face ball skill.
 """
 
 from bridge.ball_finder import BallSighting
@@ -15,6 +16,10 @@ LOST_AFTER_S = 1.0    # this long without a ball starts the search
 SEARCH_PITCH = 0.3    # rad down while searching, where a ball on the floor would be
 SEARCH_YAW_MAX = 1.2  # rad, the sweep turns around here
 SEARCH_RATE = 1.0     # rad/s of sweep
+
+FACE_START = 0.3      # rad of head yaw that starts a body turn
+FACE_STOP = 0.1       # rad of head yaw that ends it, the gap stops flip-flopping
+FACE_GAIN = 1.5       # rad/s of body turn per rad of head yaw
 
 
 class BallFollower:
@@ -80,3 +85,32 @@ class BallFollower:
         yaw = max(-self._yaw_max, min(self._yaw_max, yaw))
 
         return pitch, yaw
+
+
+class BodyTurner:
+    """Turn rate for the body from the commanded head yaw. Same sign: head left, body left."""
+
+    def __init__(self, turn_max: float):
+        self._turn_max = float(turn_max)
+        self._turning = False
+
+    @property
+    def turning(self) -> bool:
+        """True while the body is catching up with the head."""
+        return self._turning
+
+    def update(self, yaw: float, searching: bool) -> float:
+        """Turn rate in rad/s. Zero while searching, or while the head is near the middle."""
+        if searching:
+            self._turning = False
+            return 0.0
+
+        if abs(yaw) >= FACE_START:
+            self._turning = True
+        elif abs(yaw) <= FACE_STOP:
+            self._turning = False
+
+        if not self._turning:
+            return 0.0
+
+        return max(-self._turn_max, min(self._turn_max, FACE_GAIN * yaw))
