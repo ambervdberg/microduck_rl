@@ -6,11 +6,19 @@ from argparse import Namespace
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from viewer_bridge import bridge_limits, keep_alive, needs_ground_contact, policy_paths
+from viewer_bridge import bridge_limits, keep_alive, needs_ball, needs_ground_contact, policy_paths, viewer_cfg
 
 
-def _args(sitstand=None, roulade=None, standup=None) -> Namespace:
-    return Namespace(policy="walk.onnx", sitstand=sitstand, roulade=roulade, standup=standup)
+def _args(sitstand=None, roulade=None, standup=None, kick_right=None, kick_left=None, ground_pick=None) -> Namespace:
+    return Namespace(
+        policy="walk.onnx",
+        sitstand=sitstand,
+        roulade=roulade,
+        standup=standup,
+        kick_right=kick_right,
+        kick_left=kick_left,
+        ground_pick=ground_pick,
+    )
 
 
 def test_the_walking_policy_is_the_only_one_loaded_by_default():
@@ -76,3 +84,48 @@ def test_keep_alive_survives_a_cfg_without_those_terminations():
     cfg.terminations = {}
     keep_alive(cfg)
     assert cfg.terminations == {}
+
+
+def test_kick_and_ground_pick_flags_load_sessions_under_the_commander_names():
+    paths = policy_paths(_args(kick_right="kr.onnx", kick_left="kl.onnx", ground_pick="gp.onnx"))
+    assert paths == {
+        "walking": "walk.onnx",
+        "kick_right": "kr.onnx",
+        "kick_left": "kl.onnx",
+        "ground_pick": "gp.onnx",
+    }
+
+
+def test_kick_and_ground_pick_flags_ask_for_the_ground_contact_model():
+    assert needs_ground_contact(_args(kick_right="kr.onnx")) is True
+    assert needs_ground_contact(_args(kick_left="kl.onnx")) is True
+    assert needs_ground_contact(_args(ground_pick="gp.onnx")) is True
+
+
+def test_only_a_kick_flag_asks_for_the_ball():
+    assert needs_ball(_args()) is False
+    assert needs_ball(_args(ground_pick="gp.onnx")) is False
+    assert needs_ball(_args(kick_right="kr.onnx")) is True
+    assert needs_ball(_args(kick_left="kl.onnx")) is True
+
+
+def test_the_ball_joins_the_scene_second_with_contact_headroom():
+    cfg = viewer_cfg(sitstand=True, ball=True)
+    assert list(cfg.scene.entities) == ["robot", "ball"]
+    assert cfg.sim.nconmax == 50
+
+
+def test_no_kick_flag_means_no_ball():
+    cfg = viewer_cfg(sitstand=True)
+    assert list(cfg.scene.entities) == ["robot"]
+
+
+def test_kick_and_ground_pick_flags_unlock_only_their_own_session():
+    limits = bridge_limits(_args(kick_right="kr.onnx"))
+    assert limits.kick_right_session is True
+    assert limits.kick_left_session is False
+    assert limits.ground_pick_session is False
+
+    limits = bridge_limits(_args(ground_pick="gp.onnx"))
+    assert limits.ground_pick_session is True
+    assert limits.kick_right_session is False

@@ -1,20 +1,24 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
 The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
-TrickCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
+TrickCmd / BallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
 to PolicyInference. Here ViewerCommander applies them to the env's command terms
 instead, once per policy step, and publishes the status the bridge serves on /status.
+During a ground pick the twist slots carry the phase encoding the policy was trained on.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
 
+import torch
+
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
     RISE_SECONDS,
     TRICKS,
+    BallCmd,
     BridgeState,
     GestureCmd,
     LookCmd,
@@ -26,6 +30,7 @@ from bridge.state import (
     available_actions,
 )
 from bridge.watchdog import BrainWatchdog
+from mjlab_microduck.tasks.microduck_ball_kick_env_cfg import BALL_OFFSET_ABS_Y, BALL_OFFSET_X, BALL_RADIUS
 
 # Head command layout: [neck_pitch, head_pitch, head_yaw, head_roll].
 HEAD_PITCH = 1
@@ -46,6 +51,12 @@ class _GestureKeys:
         return tuple(GESTURE_KEYS.values())
 
 
+def _yaw(quat) -> float:
+    """Heading of a (w, x, y, z) quaternion about the world z axis."""
+    w, x, y, z = (float(v) for v in quat)
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
 @dataclass
 class ViewerLimits:
     """The envelope fields bridge.state.policy_envelope reads off a policy."""
@@ -60,6 +71,9 @@ class ViewerLimits:
     sit_session: bool = False  # truthy: a sitstand policy is loaded
     roulade_session: bool = False  # truthy: a roulade policy is loaded
     standup_session: bool = False  # truthy: a get up policy is loaded
+    kick_right_session: bool = False  # truthy: a right foot kick policy is loaded
+    kick_left_session: bool = False  # truthy: a left foot kick policy is loaded
+    ground_pick_session: bool = False  # truthy: a ground pick policy is loaded
     gesture_player: _GestureKeys = field(default_factory=_GestureKeys)
 
 
@@ -84,6 +98,7 @@ class ViewerCommander:
         self._posture = "standing"
         self._rise_until = 0.0
         self._trick: str | None = None
+        self._trick_started = 0.0
         self._trick_until = 0.0
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
@@ -133,6 +148,8 @@ class ViewerCommander:
             self._set_posture(cmd.sit)
         elif isinstance(cmd, TrickCmd):
             self._start_trick(cmd.name)
+        elif isinstance(cmd, BallCmd):
+            self._place_ball(cmd.foot)
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
@@ -170,6 +187,7 @@ class ViewerCommander:
         """Hand the robot to a trick policy on an all-zero command block."""
         self._clear_commands()
         self._trick = name
+        self._trick_started = self._time
         self._trick_until = self._time + TRICKS[name].seconds
 
     def _expire_trick(self) -> None:
@@ -208,6 +226,23 @@ class ViewerCommander:
         self._gesture = None
         self._walk_until = 0.0
 
+    # Ball.
+
+    def _place_ball(self, foot: str) -> None:
+        """Put the ball at the training spot in front of one foot, at rest."""
+        robot = self._env.scene["robot"].data
+        x, y = float(robot.root_link_pos_w[0, 0]), float(robot.root_link_pos_w[0, 1])
+        yaw = _yaw(robot.root_link_quat_w[0])
+        off_y = -BALL_OFFSET_ABS_Y if foot == "right" else BALL_OFFSET_ABS_Y
+
+        ball_x = x + math.cos(yaw) * BALL_OFFSET_X - math.sin(yaw) * off_y
+        ball_y = y + math.sin(yaw) * BALL_OFFSET_X + math.cos(yaw) * off_y
+        pose = torch.tensor([[ball_x, ball_y, BALL_RADIUS, 1.0, 0.0, 0.0, 0.0]], device=self._env.device)
+
+        ball = self._env.scene["ball"]
+        ball.write_root_link_pose_to_sim(pose)
+        ball.write_root_link_velocity_to_sim(torch.zeros(1, 6, device=self._env.device))
+
     # Tensors.
 
     def _pin_command_terms(self) -> None:
@@ -231,13 +266,8 @@ class ViewerCommander:
         for i, value in enumerate(self._twist_command()):
             twist.vel_command_b[:, i] = value
 
-        head = list(self._head)
-        offset = self._gesture_offset()
-        if offset is not None:
-            axis, value = offset
-            head[axis] += value
         head_term = manager.get_term("head_pose")
-        for i, value in enumerate(head):
+        for i, value in enumerate(self._head_command()):
             head_term._command[:, i] = value
 
         # The play cfg samples a random body pose at reset and the term is pinned.
@@ -247,7 +277,10 @@ class ViewerCommander:
             body_term._command[:, i] = 0.0
 
     def _twist_command(self) -> list[float]:
-        """Sitting writes the posture flag in the vx slot, rising writes the stand flag, zero."""
+        """The twist slots: posture flag while sitting, phase encoding during a ground pick, else the walk."""
+        if self._trick == "ground_pick":
+            return self._ground_pick_phase_command()
+
         if self._posture == "sitting":
             return [1.0, 0.0, 0.0]
 
@@ -255,6 +288,23 @@ class ViewerCommander:
             return [0.0, 0.0, 0.0]
 
         return self._twist
+
+    def _ground_pick_phase_command(self) -> list[float]:
+        """[cos(2πφ), sin(2πφ), 0], φ from 0 at the start to 1 at the end of the cycle."""
+        phase = (self._time - self._trick_started) / TRICKS["ground_pick"].seconds
+        return [math.cos(2.0 * math.pi * phase), math.sin(2.0 * math.pi * phase), 0.0]
+
+    def _head_command(self) -> list[float]:
+        """The head slots: zero during a trick, else the held pose plus the gesture wave."""
+        if self._trick_runs():
+            return [0.0, 0.0, 0.0, 0.0]
+
+        head = list(self._head)
+        offset = self._gesture_offset()
+        if offset is not None:
+            axis, value = offset
+            head[axis] += value
+        return head
 
     def _gesture_offset(self) -> tuple[int, float] | None:
         """Sine wave on head pitch (nod) or yaw (shake) for GESTURE_SECONDS."""

@@ -19,7 +19,7 @@ import mujoco.viewer
 import onnxruntime as ort
 
 # scripts/ is sys.path[0] when this file is run as a script.
-from bridge.state import GET_UP_SECONDS, ROLL_SECONDS
+from bridge.state import GET_UP_SECONDS, KICK_SECONDS, ROLL_SECONDS
 from gestures import GesturePlayer, default_gestures
 
 MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
@@ -142,7 +142,7 @@ class PolicyInference:
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None, standup_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=ROLL_SECONDS,
+                 kick_duration=KICK_SECONDS, roulade_duration=ROLL_SECONDS,
                  standup_duration=GET_UP_SECONDS):
         self.model = model
         self.data = data
@@ -267,6 +267,8 @@ class PolicyInference:
         # The bridge unlocks /roll and /get_up off these two.
         self.roulade_session = self.behavior_sessions.get("roulade")
         self.standup_session = self.behavior_sessions.get("standup")
+        self.kick_right_session = self.behavior_sessions.get("kick_right")
+        self.kick_left_session = self.behavior_sessions.get("kick_left")
 
         # Validate at least one policy loaded. A sitstand policy can run alone
         # (it holds the stand at flag=0), unlike the old one-way sit policy.
@@ -869,7 +871,7 @@ def main():
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
     parser.add_argument("--standup", type=str, default=None, help="Path to standup (get up off the floor) policy ONNX (press U to trigger). Requires --new-cmd-obs.")
-    parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
+    parser.add_argument("--kick-duration", type=float, default=KICK_SECONDS, help=f"Seconds a kick policy stays active before handing back to standing/walking (default: {KICK_SECONDS})")
     parser.add_argument("--roulade-duration", type=float, default=ROLL_SECONDS, help=f"Seconds the roulade policy stays active before handing back to standing/walking (default: {ROLL_SECONDS}, ~the roll itself; the standing/walking policy takes over for the settle)")
     parser.add_argument("--standup-duration", type=float, default=GET_UP_SECONDS, help=f"Seconds the standup policy stays active before handing back to standing/walking (default: {GET_UP_SECONDS})")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")

@@ -2,11 +2,12 @@
 
     uv run scripts/viewer_bridge.py --policy walk_lowspeed-range.onnx [--sitstand sitstand.onnx]
         [--roulade roulade.onnx] [--standup standup.onnx]
+        [--kick-right kick_right.onnx] [--kick-left kick_left.onnx] [--ground-pick ground_pick.onnx]
         [--bridge-port 8630] [--viewer-port 8632]
 
 Then open http://localhost:8632 for the viewer. The bridge listens on 127.0.0.1:<bridge-port>
 with the same routes infer_policy.py --bridge serves (/walk, /look, /gesture, /sit, /stand,
-/roll, /get_up, /stop, /reset, /status), so scripts/brain works unchanged.
+/roll, /get_up, /kick, /ball, /ground_pick, /stop, /reset, /status), so scripts/brain works unchanged.
 """
 from __future__ import annotations
 
@@ -30,10 +31,13 @@ from mjlab.viewer import ViserPlayViewer
 from viewer_commander import ViewerCommander, ViewerLimits
 
 import mjlab_microduck.tasks  # noqa: F401  registers the tasks
-from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
+from mjlab_microduck.robot.microduck_constants import MICRODUCK_BALL_CFG, MICRODUCK_STANDUP_ROBOT_CFG
 
 TASK = "Mjlab-Velocity-Flat-MicroDuck"
 LONG_EPISODE_S = 3600.0
+
+# Contact headroom for the ball, the same value the kick task uses.
+BALL_NCONMAX = 50
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +46,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sitstand", help="ONNX sitstand policy, unlocks /sit and /stand")
     parser.add_argument("--roulade", help="ONNX roulade policy, unlocks /roll")
     parser.add_argument("--standup", help="ONNX standup policy, unlocks /get_up")
+    parser.add_argument("--kick-right", help="ONNX right foot kick policy, unlocks /kick and /ball for that foot")
+    parser.add_argument("--kick-left", help="ONNX left foot kick policy, unlocks /kick and /ball for that foot")
+    parser.add_argument("--ground-pick", help="ONNX ground pick policy, unlocks /ground_pick")
     parser.add_argument("--bridge-port", type=int, default=8630)
     parser.add_argument("--viewer-port", type=int, default=8632)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -58,10 +65,11 @@ def keep_alive(cfg) -> None:
     cfg.episode_length_s = LONG_EPISODE_S
 
 
-def build_env(device: str, sitstand: bool = False) -> RslRlVecEnvWrapper:
-    """One quiet env: no pushes, no obs noise, play config.
+def viewer_cfg(sitstand: bool = False, ball: bool = False):
+    """One quiet play cfg: no pushes, no obs noise, never respawns.
 
-    sitstand also stands for roll and get up: all three need the ground-contact model.
+    sitstand also stands for roll, get up, kick and ground pick: they all need the
+    ground-contact model. ball adds the kick ball as a second entity, robot first.
     """
     cfg = load_env_cfg(TASK, play=True)
     cfg.scene.num_envs = 1
@@ -70,6 +78,11 @@ def build_env(device: str, sitstand: bool = False) -> RslRlVecEnvWrapper:
     # A robot on the ground falls through the walk model's floor, only the feet collide.
     if sitstand:
         cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
+
+    # The robot stays first: reset events write its root state at qpos[:, 0:7].
+    if ball:
+        cfg.scene.entities = {**cfg.scene.entities, "ball": MICRODUCK_BALL_CFG}
+        cfg.sim.nconmax = BALL_NCONMAX
 
     cfg.events.pop("push_robot", None)
     for term in cfg.observations["actor"].terms.values():
@@ -81,7 +94,12 @@ def build_env(device: str, sitstand: bool = False) -> RslRlVecEnvWrapper:
     cfg.viewer.elevation = 17.0
     cfg.viewer.lookat = (0.0, 0.0, 0.0)
 
-    env = ManagerBasedRlEnv(cfg=cfg, device=device)
+    return cfg
+
+
+def build_env(device: str, sitstand: bool = False, ball: bool = False) -> RslRlVecEnvWrapper:
+    """The viewer env built from viewer_cfg."""
+    env = ManagerBasedRlEnv(cfg=viewer_cfg(sitstand, ball), device=device)
     return RslRlVecEnvWrapper(env, clip_actions=load_rl_cfg(TASK).clip_actions)
 
 
@@ -118,7 +136,14 @@ def policy_paths(args: argparse.Namespace) -> dict[str, str]:
     """The ONNX files to load, keyed by the name the commander uses."""
     paths = {"walking": args.policy}
 
-    for name, path in (("sit", args.sitstand), ("roll", args.roulade), ("get_up", args.standup)):
+    for name, path in (
+        ("sit", args.sitstand),
+        ("roll", args.roulade),
+        ("get_up", args.standup),
+        ("kick_right", args.kick_right),
+        ("kick_left", args.kick_left),
+        ("ground_pick", args.ground_pick),
+    ):
         if path:
             paths[name] = path
 
@@ -131,17 +156,25 @@ def bridge_limits(args: argparse.Namespace) -> ViewerLimits:
         sit_session=bool(args.sitstand),
         roulade_session=bool(args.roulade),
         standup_session=bool(args.standup),
+        kick_right_session=bool(args.kick_right),
+        kick_left_session=bool(args.kick_left),
+        ground_pick_session=bool(args.ground_pick),
     )
 
 
 def needs_ground_contact(args: argparse.Namespace) -> bool:
     """True when a loaded policy puts the robot on the ground and needs its collisions."""
-    return bool(args.sitstand or args.roulade or args.standup)
+    return bool(args.sitstand or args.roulade or args.standup or args.kick_right or args.kick_left or args.ground_pick)
+
+
+def needs_ball(args: argparse.Namespace) -> bool:
+    """True when a kick policy is loaded, the only reason to have a ball."""
+    return bool(args.kick_right or args.kick_left)
 
 
 def main() -> None:
     args = parse_args()
-    env = build_env(args.device, needs_ground_contact(args))
+    env = build_env(args.device, needs_ground_contact(args), needs_ball(args))
     unwrapped = env.unwrapped
     unwrapped.reset()
 

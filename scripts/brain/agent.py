@@ -24,6 +24,9 @@ look down, then look up, then look(0, 0) if the head should end up straight.
 The robot can sit down and stand back up, and it must stand up before it walks.
 It can also do a forward roll when asked, and get up off the floor after a
 fall. Leaving a sit is stand_up, not get_up.
+It can kick a ball with either foot. A kick never places a ball. Call
+new_ball only when the user asks for a new ball.
+It can also bow its beak to the floor and back up with ground_pick.
 Answer briefly after acting."""
 
 

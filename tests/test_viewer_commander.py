@@ -11,8 +11,11 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
+    GROUND_PICK_SECONDS,
+    KICK_SECONDS,
     NO_TRICK,
     ROLL_SECONDS,
+    BallCmd,
     BridgeState,
     WalkCmd,
 )
@@ -50,24 +53,47 @@ class _Robot:
         projected_gravity_b = torch.tensor([[0.0, 0.0, -1.0]])
         root_link_lin_vel_b = torch.tensor([[0.25, 0.0, 0.0]])
         root_link_ang_vel_b = torch.tensor([[0.0, 0.0, 0.1]])
+        root_link_pos_w = torch.tensor([[1.0, 2.0, 0.11]])
+        # Yaw 90 deg: the robot faces world +y.
+        root_link_quat_w = torch.tensor([[0.7071068, 0.0, 0.0, 0.7071068]])
+
+
+class _Ball:
+    """Records the root writes the commander makes."""
+
+    def __init__(self):
+        self.poses = []
+        self.velocities = []
+
+    def write_root_link_pose_to_sim(self, pose, env_ids=None):
+        self.poses.append(pose[0].tolist())
+
+    def write_root_link_velocity_to_sim(self, velocity, env_ids=None):
+        self.velocities.append(velocity[0].tolist())
 
 
 class _Env:
-    def __init__(self):
+    def __init__(self, ball: bool = False):
         self.command_manager = _Manager()
         self.scene = {"robot": _Robot()}
+        if ball:
+            self.scene["ball"] = _Ball()
         self.resets = 0
+        self.device = "cpu"
 
     def reset(self):
         self.resets += 1
 
 
-def _setup(sit_session: bool = False, roll: bool = False, get_up: bool = False):
-    env = _Env()
+def _setup(sit_session=False, roll=False, get_up=False, kick_right=False, kick_left=False, ground_pick=False):
+    env = _Env(ball=kick_right or kick_left)
     limits = ViewerLimits(
         sit_session=sit_session,
         roulade_session=roll,
         standup_session=get_up,
+        kick_right_session=kick_right,
+        kick_left_session=kick_left,
+        ground_pick_session=ground_pick,
     )
     state = BridgeState(limits)
     commander = ViewerCommander(env, state, DT)
@@ -476,3 +502,117 @@ def test_body_pose_is_zeroed_every_tick():
     body._command[:] = 0.3
     commander.tick()
     assert body._command[0].tolist() == [0.0] * 6
+
+
+def test_kick_is_offered_only_with_its_own_policy():
+    _env, state, commander = _setup(kick_left=True)
+    commander.tick()
+    actions = state.get_status()["actions"]
+    assert actions["kick left"] is True
+    assert actions["kick right"] is False
+
+
+def test_kick_swaps_to_its_own_policy_and_zeroes_the_command():
+    env, state, commander = _setup(kick_right=True)
+    state.submit_kick("right")
+    commander.tick()
+    assert commander.active_policy() == "kick_right"
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+    assert state.get_status()["trick"] == "kicking"
+
+
+def test_kick_hands_back_to_walking_at_the_timer():
+    _env, state, commander = _setup(kick_left=True)
+    state.submit_kick("left")
+    commander.tick()
+    _tick_for(commander, KICK_SECONDS)
+    assert commander.active_policy() == "walking"
+    assert state.get_status()["trick"] == NO_TRICK
+
+
+def test_new_ball_lands_in_front_of_the_right_foot_in_the_robot_frame():
+    env, state, commander = _setup(kick_right=True)
+    state.submit_ball("right")
+    commander.tick()
+    ball = env.scene["ball"]
+    assert ball.poses[-1] == pytest.approx([1.042, 2.09, 0.035, 1.0, 0.0, 0.0, 0.0], abs=1e-4)
+    assert ball.velocities[-1] == [0.0] * 6
+
+
+def test_new_ball_lands_in_front_of_the_left_foot_in_the_robot_frame():
+    env, state, commander = _setup(kick_left=True)
+    state.submit_ball("left")
+    commander.tick()
+    assert env.scene["ball"].poses[-1] == pytest.approx([0.958, 2.09, 0.035, 1.0, 0.0, 0.0, 0.0], abs=1e-4)
+
+
+def test_new_ball_is_ignored_while_a_trick_runs():
+    env, state, commander = _setup(roll=True, kick_right=True)
+    state.submit_trick("roll")
+    commander.tick()
+    state._enqueue(BallCmd("right"))
+    commander.tick()
+    assert env.scene["ball"].poses == []
+
+
+def test_new_ball_does_not_touch_the_command():
+    env, state, commander = _setup(kick_right=True)
+    state.submit_look(0.3, 0.0)
+    commander.tick()
+    state.submit_ball("right")
+    commander.tick()
+    assert _head(env) == pytest.approx([0.0, 0.3, 0.0, 0.0])
+
+
+def _ticks(commander, count):
+    for _ in range(count):
+        commander.tick()
+
+
+def test_ground_pick_is_offered_only_with_its_policy():
+    _env, state, commander = _setup()
+    commander.tick()
+    assert state.get_status()["actions"]["ground pick"] is False
+
+    _env, state, commander = _setup(ground_pick=True)
+    commander.tick()
+    assert state.get_status()["actions"]["ground pick"] is True
+
+
+def test_ground_pick_writes_the_phase_start_and_swaps_policy():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_ground_pick()
+    commander.tick()
+    assert commander.active_policy() == "ground_pick"
+    assert state.get_status()["trick"] == "picking"
+    assert _twist(env) == pytest.approx([1.0, 0.0, 0.0])
+
+
+def test_ground_pick_phase_advances_with_time():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_ground_pick()
+    commander.tick()
+    _ticks(commander, int(round(GROUND_PICK_SECONDS / 4 / DT)))
+    assert _twist(env) == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+    _ticks(commander, int(round(GROUND_PICK_SECONDS / 4 / DT)))
+    assert _twist(env) == pytest.approx([-1.0, 0.0, 0.0], abs=1e-6)
+
+
+def test_ground_pick_zeroes_the_head_even_after_a_look():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_look(0.4, 0.2)
+    commander.tick()
+    state.submit_ground_pick()
+    commander.tick()
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_ground_pick_hands_back_to_walking_at_four_seconds():
+    env, state, commander = _setup(ground_pick=True)
+    state.submit_ground_pick()
+    commander.tick()
+    _tick_for(commander, GROUND_PICK_SECONDS)
+    assert commander.active_policy() == "walking"
+    assert state.get_status()["trick"] == NO_TRICK
+    assert _twist(env) == [0.0, 0.0, 0.0]

@@ -76,6 +76,8 @@ LOOK_SETTLE_S = 1.0
 # How long each trick runs, matching the bridge timers.
 ROLL_SECONDS = 2.0
 GET_UP_SECONDS = 3.0
+KICK_SECONDS = 1.5
+GROUND_PICK_SECONDS = 4.0
 
 # Extra wait on top of the trick seconds. Sim time in the viewer runs slower than wall time.
 TRICK_WAIT_MARGIN_S = 4.0
@@ -172,13 +174,14 @@ def _post_and_wait(path: str, body: dict, max_wait) -> str:
     return reply
 
 
-def _post_and_watch(path: str, field: str, target: str, max_wait_s: float, settle_s: float = 0.0) -> str:
+def _post_and_watch(path: str, field: str, target: str, max_wait_s: float, settle_s: float = 0.0,
+                    body: dict | None = None) -> str:
     """POST a command, then wait for a status field to reach its target. Errors return at once.
 
     settle_s covers a move the status cannot time: the sit flag flips at the
     start of the glide, the stand up has its own rising posture.
     """
-    reply = _post(path, {})
+    reply = _post(path, body or {})
     echo = json.loads(reply)
 
     if "error" not in echo:
@@ -193,9 +196,9 @@ def _post_posture(path: str, target: str, settle_s: float = 0.0) -> str:
     return _post_and_watch(path, "posture", target, POSTURE_MAX_WAIT_S, settle_s)
 
 
-def _post_trick(path: str, seconds: float) -> str:
+def _post_trick(path: str, seconds: float, body: dict | None = None) -> str:
     """POST a trick, then wait for the status to say no trick is running any more."""
-    return _post_and_watch(path, "trick", NO_TRICK, seconds + TRICK_WAIT_MARGIN_S)
+    return _post_and_watch(path, "trick", NO_TRICK, seconds + TRICK_WAIT_MARGIN_S, body=body)
 
 
 def _post_and_settle(path: str, body: dict) -> str:
@@ -279,9 +282,39 @@ def get_up() -> str:
 
 
 @tool
+def kick(foot: str = "right") -> str:
+    """Kick the ball with one foot, 'right' or 'left'. Returns once the kick is over.
+
+    The robot must be standing and free. Nothing checks for a ball: with no
+    ball at that foot the kick swings at air, like the real robot. Do not call
+    new_ball before a kick on your own, the user asks for a ball.
+    """
+    return _post_trick("/kick", KICK_SECONDS, {"foot": foot})
+
+
+@tool
+def new_ball(foot: str = "right") -> str:
+    """Put a new ball in front of one foot, 'right' or 'left'. Returns at once.
+
+    There is one ball. It moves to the kick spot of that foot. Walking can
+    push it away, a kick sends it rolling. The bridge never reports where it is.
+    """
+    return _post("/ball", {"foot": foot})
+
+
+@tool
+def ground_pick() -> str:
+    """Bow the beak down to the floor and back up, one 4 s cycle. Returns when it is over.
+
+    Nothing is grabbed, it is the bow only. The robot must be standing and free.
+    """
+    return _post_trick("/ground_pick", GROUND_PICK_SECONDS)
+
+
+@tool
 def status() -> str:
     """Current robot state: active policy, speeds, head pose, fallen or not."""
     return _get("/status")
 
 
-ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, roll, get_up, status]
+ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, status]

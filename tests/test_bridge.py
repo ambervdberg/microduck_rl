@@ -19,12 +19,16 @@ from gestures import default_gestures  # noqa: E402
 from bridge.state import (  # noqa: E402
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
+    GROUND_PICK_SECONDS,
     HEAD_PITCH_MAX,
     HEAD_YAW_MAX,
+    KICK_SECONDS,
     RISE_SECONDS,
     ROLL_SECONDS,
+    TRICKS,
     WALK_DEFAULT_S,
     WALK_MAX_S,
+    BallCmd,
     BridgeState,
     GestureCmd,
     LookCmd,
@@ -81,6 +85,9 @@ class FakePolicy:
         sit: bool = False,
         roll: bool = False,
         get_up: bool = False,
+        kick_right: bool = False,
+        kick_left: bool = False,
+        ground_pick: bool = False,
     ):
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.head_offset = np.zeros(4, dtype=np.float32)
@@ -94,6 +101,11 @@ class FakePolicy:
         self.sit_session = object() if sit else None
         self.roulade_session = object() if roll else None
         self.standup_session = object() if get_up else None
+        self.kick_right_session = object() if kick_right else None
+        self.kick_left_session = object() if kick_left else None
+        self.ground_pick_session = object() if ground_pick else None
+        self.ground_picks = 0
+        self.balls = []
         self.behaviors = []
         self.sit_mode = False
         self.sit_toggles = 0
@@ -138,6 +150,17 @@ class FakePolicy:
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.current_policy = name
         self._update_command()
+
+    def trigger_ground_pick(self):
+        """Mimics PolicyInference.trigger_ground_pick: session swap, phase runs from zero."""
+        self.ground_picks += 1
+        self.vel_cmd = np.zeros(3, dtype=np.float32)
+        self.current_policy = "ground_pick"
+        self._update_command()
+
+    def _place_ball(self, behavior):
+        """Mimics PolicyInference._place_ball: records which kick foot asked for the ball."""
+        self.balls.append(behavior)
 
     def start_gesture(self, key):
         cfg = self.gesture_player.trigger(key)
@@ -433,6 +456,122 @@ class TestTrickState:
         assert state.request_count() == before + 1
 
 
+class TestKickState:
+    def test_kick_right_and_left_are_queued(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        assert state.submit_kick("right") == {"trick": "kick_right"}
+        assert state.drain() == [TrickCmd("kick_right")]
+        assert state.submit_kick("left") == {"trick": "kick_left"}
+        assert state.drain() == [TrickCmd("kick_left")]
+
+    def test_kick_defaults_to_the_right_foot(self):
+        state, _ = _pair(kick_right=True)
+        assert state.submit_kick() == {"trick": "kick_right"}
+
+    def test_unknown_foot_is_rejected(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        with pytest.raises(ValueError, match="unknown foot"):
+            state.submit_kick("middle")
+        assert state.drain() == []
+
+    def test_kick_without_its_policy_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        with pytest.raises(ValueError, match="no kick_left policy loaded, start the runner with --kick-left"):
+            state.submit_kick("left")
+
+    def test_kick_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, kick_right=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_kick("right")
+
+    def test_kick_while_rising_is_rejected(self):
+        state, _ = _pair(sit=True, kick_right=True)
+        state.set_status({"sitting": False, "posture": "rising"})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_kick("right")
+
+    def test_kick_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        state.set_status({"trick": "rolling"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_kick("right")
+
+    def test_kick_seconds_is_the_trick_timer(self):
+        assert TRICKS["kick_right"].seconds == KICK_SECONDS
+        assert TRICKS["kick_left"].seconds == KICK_SECONDS
+        assert TRICKS["kick_right"].status == "kicking"
+
+
+class TestBallState:
+    def test_ball_is_queued_for_either_foot(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        assert state.submit_ball("right") == {"ball": "right"}
+        assert state.submit_ball("left") == {"ball": "left"}
+        assert state.drain() == [BallCmd("right"), BallCmd("left")]
+
+    def test_ball_defaults_to_the_right_foot(self):
+        state, _ = _pair(kick_right=True)
+        assert state.submit_ball() == {"ball": "right"}
+
+    def test_ball_without_a_kick_policy_for_that_foot_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        with pytest.raises(ValueError, match="no kick_left policy loaded"):
+            state.submit_ball("left")
+        assert state.drain() == []
+
+    def test_ball_with_an_unknown_foot_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        with pytest.raises(ValueError, match="unknown foot"):
+            state.submit_ball("both")
+
+    def test_ball_during_a_trick_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        state.set_status({"trick": "kicking"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_ball("right")
+
+    def test_ball_with_a_kick_still_queued_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        state.submit_kick("right")
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_ball("right")
+
+    def test_ball_counts_as_a_brain_request(self):
+        state, _ = _pair(kick_right=True)
+        before = state.request_count()
+        state.submit_ball("right")
+        assert state.request_count() == before + 1
+
+
+class TestGroundPickState:
+    def test_ground_pick_is_queued(self):
+        state, _ = _pair(ground_pick=True)
+        assert state.submit_ground_pick() == {"trick": "ground_pick"}
+        assert state.drain() == [TrickCmd("ground_pick")]
+
+    def test_ground_pick_without_its_policy_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError, match="no ground_pick policy loaded, start the runner with --ground-pick"):
+            state.submit_ground_pick()
+
+    def test_ground_pick_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, ground_pick=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_ground_pick()
+
+    def test_ground_pick_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(ground_pick=True)
+        state.set_status({"trick": "kicking"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_ground_pick()
+
+    def test_ground_pick_timer_and_status_name(self):
+        assert TRICKS["ground_pick"].seconds == GROUND_PICK_SECONDS
+        assert TRICKS["ground_pick"].status == "picking"
+
+
 class TestAvailableActions:
     def test_walking_policy_offers_walk_look_and_both_gestures(self):
         actions = available_actions(FakePolicy())
@@ -445,9 +584,15 @@ class TestAvailableActions:
         actions = available_actions(FakePolicy())
         assert actions["sit"] is False
         assert actions["stand up"] is False
-        assert actions["kick"] is False
+        assert actions["kick right"] is False
+        assert actions["kick left"] is False
         assert actions["roulade"] is False
-        assert actions["pick up"] is False
+        assert actions["ground pick"] is False
+
+    def test_kick_actions_follow_their_own_session(self):
+        actions = available_actions(FakePolicy(kick_left=True))
+        assert actions["kick left"] is True
+        assert actions["kick right"] is False
 
     def test_walk_is_unavailable_without_a_walking_policy(self):
         assert available_actions(FakePolicy(walking=False))["walk"] is False
@@ -838,6 +983,52 @@ class TestSkillsTrick:
         _tick_seconds(runner, ROLL_SECONDS + 1.0, policy_enabled=False)
         assert state.get_status()["trick"] == "rolling"
 
+    def test_kick_starts_its_behavior_and_reports_kicking(self):
+        state, policy = _pair(kick_right=True, kick_left=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_kick("left")
+        runner.tick()
+        assert policy.behaviors == ["kick_left"]
+        assert state.get_status()["trick"] == "kicking"
+
+    def test_kick_returns_to_none_after_kick_seconds(self):
+        state, policy = _pair(kick_right=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_kick("right")
+        runner.tick()
+        # KICK_SECONDS is an exact multiple of CONTROL_DT, so a one-tick margin
+        # keeps this check off the exact expiry boundary.
+        _tick_seconds(runner, KICK_SECONDS - 2 * CONTROL_DT)
+        assert state.get_status()["trick"] == "kicking"
+        _tick_seconds(runner, 2 * CONTROL_DT)
+        assert state.get_status()["trick"] == "none"
+
+    def test_ground_pick_starts_the_phase_runner_and_reports_picking(self):
+        state, policy = _pair(ground_pick=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_ground_pick()
+        runner.tick()
+        assert policy.ground_picks == 1
+        assert policy.behaviors == []
+        assert state.get_status()["trick"] == "picking"
+        assert state.get_status()["policy"] == "ground_pick"
+
+    def test_ground_pick_returns_to_none_after_its_cycle(self):
+        state, policy = _pair(ground_pick=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_ground_pick()
+        runner.tick()
+        _tick_seconds(runner, GROUND_PICK_SECONDS + CONTROL_DT)
+        assert state.get_status()["trick"] == "none"
+
+    def test_new_ball_reaches_the_runner_for_that_foot(self):
+        state, policy = _pair(kick_right=True, kick_left=True)
+        runner = skills.SkillRunner(policy, state, CONTROL_DT)
+        state.submit_ball("left")
+        runner.tick()
+        assert policy.balls == ["kick_left"]
+        assert state.get_status()["trick"] == "none"
+
 
 def _post(url, body):
     req = urllib.request.Request(
@@ -1016,4 +1207,51 @@ class TestBridgeServer:
             urllib.request.urlopen(req, timeout=5)
         assert excinfo.value.code == 400
         assert "error" in json.loads(excinfo.value.read())
+        assert state.drain() == []
+
+    def test_kick_roundtrip_defaults_to_the_right_foot(self):
+        with _served(FakePolicy(kick_right=True, kick_left=True)) as (state, url):
+            assert _post(f"{url}/kick", {}) == (200, {"trick": "kick_right"})
+            assert state.drain() == [TrickCmd("kick_right")]
+            assert _post(f"{url}/kick", {"foot": "left"}) == (200, {"trick": "kick_left"})
+            assert state.drain() == [TrickCmd("kick_left")]
+
+    def test_ball_roundtrip(self):
+        with _served(FakePolicy(kick_right=True, kick_left=True)) as (state, url):
+            assert _post(f"{url}/ball", {}) == (200, {"ball": "right"})
+            assert _post(f"{url}/ball", {"foot": "left"}) == (200, {"ball": "left"})
+            assert state.drain() == [BallCmd("right"), BallCmd("left")]
+
+    def test_kick_without_its_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/kick", {"foot": "left"})
+        assert excinfo.value.code == 400
+        assert "no kick_left policy loaded" in json.loads(excinfo.value.read())["error"]
+        assert state.drain() == []
+
+    def test_ball_without_a_kick_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/ball", {})
+        assert excinfo.value.code == 400
+        assert state.drain() == []
+
+    def test_kick_with_an_unknown_foot_returns_400(self):
+        with _served(FakePolicy(kick_right=True)) as (state, url):
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                _post(f"{url}/kick", {"foot": "middle"})
+            assert excinfo.value.code == 400
+            assert state.drain() == []
+
+    def test_ground_pick_roundtrip(self):
+        with _served(FakePolicy(ground_pick=True)) as (state, url):
+            assert _post(f"{url}/ground_pick", {}) == (200, {"trick": "ground_pick"})
+            assert state.drain() == [TrickCmd("ground_pick")]
+
+    def test_ground_pick_without_its_policy_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/ground_pick", {})
+        assert excinfo.value.code == 400
         assert state.drain() == []
