@@ -6,10 +6,22 @@ from argparse import Namespace
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from viewer_bridge import bridge_limits, keep_alive, needs_ball, needs_ground_contact, policy_paths, viewer_cfg
+from viewer_bridge import (
+    HEAD_CAMERA_CFG,
+    bridge_limits,
+    keep_alive,
+    needs_ball,
+    needs_camera,
+    needs_ground_contact,
+    parse_args,
+    policy_paths,
+    viewer_cfg,
+)
+from viewer_commander import HEAD_CAMERA
 
 
-def _args(sitstand=None, roulade=None, standup=None, kick_right=None, kick_left=None, ground_pick=None) -> Namespace:
+def _args(sitstand=None, roulade=None, standup=None, kick_right=None, kick_left=None, ground_pick=None,
+          follow_ball=False) -> Namespace:
     return Namespace(
         policy="walk.onnx",
         sitstand=sitstand,
@@ -18,6 +30,7 @@ def _args(sitstand=None, roulade=None, standup=None, kick_right=None, kick_left=
         kick_right=kick_right,
         kick_left=kick_left,
         ground_pick=ground_pick,
+        follow_ball=follow_ball,
     )
 
 
@@ -102,11 +115,15 @@ def test_kick_and_ground_pick_flags_ask_for_the_ground_contact_model():
     assert needs_ground_contact(_args(ground_pick="gp.onnx")) is True
 
 
-def test_only_a_kick_flag_asks_for_the_ball():
+def test_no_flags_means_no_ball():
     assert needs_ball(_args()) is False
     assert needs_ball(_args(ground_pick="gp.onnx")) is False
+
+
+def test_a_kick_flag_or_follow_ball_asks_for_the_ball():
     assert needs_ball(_args(kick_right="kr.onnx")) is True
     assert needs_ball(_args(kick_left="kl.onnx")) is True
+    assert needs_ball(_args(follow_ball=True)) is True
 
 
 def test_the_ball_joins_the_scene_second_with_contact_headroom():
@@ -129,3 +146,33 @@ def test_kick_and_ground_pick_flags_unlock_only_their_own_session():
     limits = bridge_limits(_args(ground_pick="gp.onnx"))
     assert limits.ground_pick_session is True
     assert limits.kick_right_session is False
+
+
+def test_only_the_follow_ball_flag_asks_for_the_camera():
+    assert needs_camera(_args(kick_right="kr.onnx")) is False
+    assert needs_camera(_args(kick_right="kr.onnx", follow_ball=True)) is True
+
+
+def test_the_follow_ball_flag_unlocks_the_camera_route():
+    assert bridge_limits(_args(kick_right="kr.onnx")).camera is False
+    assert bridge_limits(_args(kick_right="kr.onnx", follow_ball=True)).camera is True
+
+
+def test_the_camera_joins_the_scene_as_a_sensor_on_the_head():
+    cfg = viewer_cfg(sitstand=True, ball=True, camera=True)
+    cameras = [s for s in cfg.scene.sensors if s.name == HEAD_CAMERA]
+    assert cameras == [HEAD_CAMERA_CFG]
+    assert HEAD_CAMERA_CFG.parent_body == "robot/jaw_soft"
+    assert HEAD_CAMERA_CFG.enabled_geom_groups == (0,)
+    assert (HEAD_CAMERA_CFG.width, HEAD_CAMERA_CFG.height) == (160, 120)
+
+
+def test_no_follow_ball_flag_means_no_camera():
+    cfg = viewer_cfg(sitstand=True, ball=True)
+    assert all(s.name != HEAD_CAMERA for s in (cfg.scene.sensors or ()))
+
+
+def test_follow_ball_alone_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["viewer_bridge.py", "--policy", "walk.onnx", "--follow-ball"])
+    args = parse_args()
+    assert args.follow_ball is True

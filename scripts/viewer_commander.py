@@ -38,6 +38,9 @@ HEAD_YAW = 2
 
 BODY_POSE_SLOTS = 6
 
+# Name of the head camera sensor, also its key in env.scene.
+HEAD_CAMERA = "head_camera"
+
 GESTURE_SECONDS = 1.6
 GESTURE_AMPLITUDE_RAD = 0.35
 
@@ -74,6 +77,7 @@ class ViewerLimits:
     kick_right_session: bool = False  # truthy: a right foot kick policy is loaded
     kick_left_session: bool = False  # truthy: a left foot kick policy is loaded
     ground_pick_session: bool = False  # truthy: a ground pick policy is loaded
+    camera: bool = False  # truthy: a head camera renders in the viewer scene
     gesture_player: _GestureKeys = field(default_factory=_GestureKeys)
 
 
