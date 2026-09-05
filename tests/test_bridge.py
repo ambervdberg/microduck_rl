@@ -30,6 +30,7 @@ from bridge.state import (  # noqa: E402
     WALK_MAX_S,
     BallCmd,
     BridgeState,
+    FollowBallCmd,
     GestureCmd,
     LookCmd,
     PostureCmd,
@@ -88,6 +89,7 @@ class FakePolicy:
         kick_right: bool = False,
         kick_left: bool = False,
         ground_pick: bool = False,
+        camera: bool = False,
     ):
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.head_offset = np.zeros(4, dtype=np.float32)
@@ -104,6 +106,7 @@ class FakePolicy:
         self.kick_right_session = object() if kick_right else None
         self.kick_left_session = object() if kick_left else None
         self.ground_pick_session = object() if ground_pick else None
+        self.camera = camera
         self.ground_picks = 0
         self.balls = []
         self.behaviors = []
@@ -572,6 +575,49 @@ class TestGroundPickState:
         assert TRICKS["ground_pick"].status == "picking"
 
 
+class TestFollowBallState:
+    def test_follow_ball_is_queued(self):
+        state, _ = _pair(camera=True)
+        assert state.submit_follow_ball() == {"following": True}
+        assert state.drain() == [FollowBallCmd()]
+
+    def test_follow_ball_without_a_camera_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError, match="no head camera, start the viewer with --follow-ball"):
+            state.submit_follow_ball()
+        assert state.drain() == []
+
+    def test_follow_ball_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, camera=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_while_rising_is_rejected(self):
+        state, _ = _pair(sit=True, camera=True)
+        state.set_status({"sitting": False, "posture": "rising"})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"trick": "kicking"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_while_fallen_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"fallen": True})
+        with pytest.raises(ValueError, match="fallen, get up first"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_counts_as_a_brain_request(self):
+        state, _ = _pair(camera=True)
+        before = state.request_count()
+        state.submit_follow_ball()
+        assert state.request_count() == before + 1
+
+
 class TestAvailableActions:
     def test_walking_policy_offers_walk_look_and_both_gestures(self):
         actions = available_actions(FakePolicy())
@@ -609,6 +655,10 @@ class TestAvailableActions:
         actions = available_actions(policy)
         assert actions["sit"] is True
         assert actions["stand up"] is True
+
+    def test_follow_ball_follows_the_camera(self):
+        assert available_actions(FakePolicy())["follow ball"] is False
+        assert available_actions(FakePolicy(camera=True))["follow ball"] is True
 
 
 class TestBrainWatchdog:
@@ -1253,5 +1303,17 @@ class TestBridgeServer:
         state, url = served_state
         with pytest.raises(urllib.error.HTTPError) as excinfo:
             _post(f"{url}/ground_pick", {})
+        assert excinfo.value.code == 400
+        assert state.drain() == []
+
+    def test_follow_ball_roundtrip(self):
+        with _served(FakePolicy(camera=True)) as (state, url):
+            assert _post(f"{url}/follow_ball", {}) == (200, {"following": True})
+            assert state.drain() == [FollowBallCmd()]
+
+    def test_follow_ball_without_a_camera_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/follow_ball", {})
         assert excinfo.value.code == 400
         assert state.drain() == []

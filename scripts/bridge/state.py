@@ -89,6 +89,11 @@ class BallCmd:
 
 
 @dataclass(frozen=True)
+class FollowBallCmd:
+    """Turn the head to keep the ball in view. Runs until a stop, a sit, a look or a trick."""
+
+
+@dataclass(frozen=True)
 class Trick:
     """One trick: the policy that runs it, how long it takes, what /status calls it."""
 
@@ -135,6 +140,7 @@ ACTIONS = (
     ("kick left", "kick_left_session"),
     ("roulade", "roulade_session"),
     ("get up off the floor", "standup_session"),
+    ("follow ball", "camera"),
 )
 
 
@@ -331,6 +337,18 @@ class BridgeState:
         """Queue one ground pick: beak to the floor and back up, one 4 s cycle."""
         return self.submit_trick("ground_pick")
 
+    def submit_follow_ball(self) -> dict:
+        """Queue a follow. Needs a head camera and a standing, free, upright robot."""
+        self._note_request()
+        self._require_camera()
+        self._require_not_seated("sitting, stand up first")
+        self._require_no_trick()
+        self._require_not_fallen()
+
+        self._enqueue(FollowBallCmd())
+
+        return {"following": True}
+
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""
         self._note_request()
@@ -399,6 +417,11 @@ class BridgeState:
         if not getattr(self._policy, trick.session, None):
             raise ValueError(f"no {name} policy loaded, start the runner with {trick.flag}")
 
+    def _require_camera(self) -> None:
+        """Reject a follow when nothing renders a head camera."""
+        if not getattr(self._policy, "camera", None):
+            raise ValueError("no head camera, start the viewer with --follow-ball")
+
     @staticmethod
     def _seated_message(name: str) -> str:
         """Why a seated robot cannot run this trick. Get up is the wrong tool for a sit."""
@@ -421,6 +444,11 @@ class BridgeState:
 
         if running or self._trick_queued():
             raise ValueError("a trick is running, wait for it")
+
+    def _require_not_fallen(self) -> None:
+        """Reject a command while the robot lies on the floor."""
+        if self.peek_status().get("fallen"):
+            raise ValueError("fallen, get up first")
 
     def _trick_queued(self) -> bool:
         """True when a trick is still waiting to be drained."""
