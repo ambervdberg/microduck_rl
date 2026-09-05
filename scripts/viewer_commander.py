@@ -1,11 +1,12 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
 The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
-TrickCmd / BallCmd / FollowBallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py
+TrickCmd / BallCmd / FollowBallCmd / FaceBallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py
 a SkillRunner applies them to PolicyInference. Here ViewerCommander applies them to the env's
 command terms instead, once per policy step, and publishes the status the bridge serves on
 /status. During a ground pick the twist slots carry the phase encoding the policy was trained
 on. A follow reads the head camera every PICTURE_EVERY ticks and steers the head pose slots.
+A face writes the turn rate into the twist yaw slot with zero forward speed.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from dataclasses import dataclass, field
 import torch
 
 from bridge.ball_finder import BallSighting, find_ball
-from bridge.follower import BallFollower
+from bridge.follower import BallFollower, BodyTurner
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
@@ -23,6 +24,7 @@ from bridge.state import (
     TRICKS,
     BallCmd,
     BridgeState,
+    FaceBallCmd,
     FollowBallCmd,
     GestureCmd,
     LookCmd,
@@ -114,6 +116,9 @@ class ViewerCommander:
         self._following = False
         self._follower: BallFollower | None = None
         self._ticks_since_picture = 0
+        self._facing = False
+        self._turner: BodyTurner | None = None
+        self._turn = 0.0
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
@@ -172,6 +177,8 @@ class ViewerCommander:
             self._place_ball(cmd.foot)
         elif isinstance(cmd, FollowBallCmd):
             self._start_follow()
+        elif isinstance(cmd, FaceBallCmd):
+            self._start_face()
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
@@ -185,6 +192,7 @@ class ViewerCommander:
         if self._posture != "standing":
             return
 
+        self._stop_face()
         self._twist = [cmd.vx, cmd.vy, cmd.wz]
         self._walk_until = self._time + cmd.seconds
 
@@ -238,6 +246,7 @@ class ViewerCommander:
         """The brain went quiet: zero the twist and, unless a gesture or a follow runs, the head."""
         self._twist = [0.0, 0.0, 0.0]
         self._walk_until = 0.0
+        self._stop_face()
 
         if self._gesture is None and not self._following:
             self._head = [0.0, 0.0, 0.0, 0.0]
@@ -278,12 +287,14 @@ class ViewerCommander:
 
     def _stop_follow(self) -> None:
         """Drop the follower. The head stays where it is until the next command."""
+        self._stop_face()
         self._following = False
         self._follower = None
 
     def _follow_tick(self) -> None:
         """Every PICTURE_EVERY ticks: read the picture, find the ball, move the head toward it."""
         if not self._following or self._is_fallen():
+            self._turn = 0.0
             return
 
         self._ticks_since_picture += 1
@@ -294,6 +305,7 @@ class ViewerCommander:
         sighting = find_ball(self._picture())
         pitch, yaw = self._follower.update(sighting, self._head[HEAD_PITCH], self._head[HEAD_YAW])
         self._head = [0.0, pitch, yaw, 0.0]
+        self._turn_tick(yaw)
 
     def _picture(self):
         """The latest head camera picture as height by width by 3, on the CPU."""
@@ -316,6 +328,28 @@ class ViewerCommander:
 
     def _searching(self) -> bool:
         return self._follower is not None and self._follower.searching
+
+    def _start_face(self) -> None:
+        """Follow with the head and let the body catch up with it."""
+        self._start_follow()
+        self._turner = BodyTurner(float(self._state.policy().vel_max_ang))
+        self._facing = True
+
+    def _stop_face(self) -> None:
+        """Stop turning. The follow, if any, goes on."""
+        self._facing = False
+        self._turner = None
+        self._turn = 0.0
+
+    def _turn_tick(self, yaw: float) -> None:
+        """Turn rate from the head yaw, once per picture."""
+        if not self._facing:
+            return
+
+        self._turn = self._turner.update(yaw, self._follower.searching)
+
+    def _turning(self) -> bool:
+        return self._turner is not None and self._turner.turning
 
     # Tensors.
 
@@ -360,6 +394,9 @@ class ViewerCommander:
 
         if self._posture == "rising":
             return [0.0, 0.0, 0.0]
+
+        if self._facing:
+            return [0.0, 0.0, self._turn]
 
         return self._twist
 
@@ -422,5 +459,7 @@ class ViewerCommander:
             "ball_seen": self._sighting() is not None,
             "ball": self._ball_status(),
             "searching": self._searching(),
+            "facing": self._facing,
+            "turning": self._turning(),
             "actions": dict(self._actions),
         })

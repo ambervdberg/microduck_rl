@@ -8,7 +8,7 @@ import torch
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from bridge.follower import LOST_AFTER_S, SEARCH_PITCH
+from bridge.follower import FACE_START, FACE_STOP, LOST_AFTER_S, SEARCH_PITCH
 from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
@@ -850,3 +850,117 @@ def test_reset_ends_the_follow():
     state.submit_reset()
     commander.tick()
     assert state.get_status()["following"] is False
+
+
+def _facing_setup(col=120, row=60):
+    """A commander with a camera and a walker, a ball painted, one tick into the face."""
+    env, state, commander = _setup(kick_right=True, camera=True)
+    env.scene["head_camera"].paint(col, row)
+    state.submit_face_ball()
+    commander.tick()
+    return env, state, commander
+
+
+def _turn_head_past_start(commander, pictures=4):
+    """Enough pictures for a ball at the picture edge to push the head yaw past FACE_START."""
+    _pictures(commander, pictures)
+
+
+def test_face_ball_is_offered_only_with_a_camera():
+    _env, state, commander = _setup(kick_right=True, camera=True)
+    commander.tick()
+    assert state.get_status()["actions"]["face ball"] is True
+
+    _env, state, commander = _setup(kick_right=True)
+    commander.tick()
+    assert state.get_status()["actions"]["face ball"] is False
+
+
+def test_facing_starts_the_follow_too():
+    _env, state, commander = _facing_setup()
+    status = state.get_status()
+    assert status["facing"] is True
+    assert status["following"] is True
+
+
+def test_the_body_turns_right_once_the_head_looks_far_right():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    assert _head(env)[HEAD_YAW] < -FACE_START
+    assert _twist(env)[2] < 0.0
+    assert _twist(env)[0] == 0.0
+    assert state.get_status()["turning"] is True
+
+
+def test_the_body_holds_while_the_head_is_near_the_middle():
+    env, state, commander = _facing_setup(col=90, row=60)
+    _pictures(commander, 2)
+    assert abs(_head(env)[HEAD_YAW]) < FACE_START
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert state.get_status()["turning"] is False
+
+
+def test_the_turn_stays_under_the_envelope():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _pictures(commander, 20)
+    assert _twist(env)[2] == pytest.approx(-state.policy().vel_max_ang)
+
+
+def test_the_body_holds_while_searching():
+    env, _state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    env.scene["head_camera"].clear()
+    _tick_for(commander, LOST_AFTER_S)
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_chat_walk_ends_the_face_and_keeps_the_follow():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    state.submit_walk(0.2, 0.0, 0.0, 2.0)
+    commander.tick()
+    status = state.get_status()
+    assert status["facing"] is False
+    assert status["following"] is True
+    assert _twist(env) == pytest.approx([0.2, 0.0, 0.0])
+
+
+def test_stop_ends_the_face():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    state.submit_stop()
+    commander.tick()
+    assert state.get_status()["facing"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_trick_ends_the_face():
+    _env, state, commander = _facing_setup()
+    state.submit_kick("right")
+    commander.tick()
+    assert state.get_status()["facing"] is False
+
+
+def test_a_fall_pauses_the_turn():
+    env, _state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    env.scene["robot"] = _FallenRobot()
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_the_watchdog_ends_the_face_and_keeps_the_follow():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _tick_silently(commander, BRAIN_TIMEOUT_S + 1.0)
+    status = state.peek_status()
+    assert status["facing"] is False
+    assert status["following"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_follow_ball_alone_never_turns_the_body():
+    env, _state, commander = _following_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    assert _head(env)[HEAD_YAW] < -FACE_START
+    assert _twist(env) == [0.0, 0.0, 0.0]
