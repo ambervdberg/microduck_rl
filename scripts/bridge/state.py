@@ -99,6 +99,11 @@ class FaceBallCmd:
 
 
 @dataclass(frozen=True)
+class GoToBallCmd:
+    """Walk to the ball and stop one foot length in front of it. Follows and faces it on the way."""
+
+
+@dataclass(frozen=True)
 class Trick:
     """One trick: the policy that runs it, how long it takes, what /status calls it."""
 
@@ -147,6 +152,7 @@ ACTIONS = (
     ("get up off the floor", "standup_session"),
     ("follow ball", "camera"),
     ("face ball", "camera"),
+    ("go to ball", "camera"),
 )
 
 
@@ -367,6 +373,19 @@ class BridgeState:
         self._enqueue(FaceBallCmd())
 
         return {"facing": True}
+
+    def submit_go_to_ball(self) -> dict:
+        """Queue a walk to the ball. Same needs as a face: walker, camera, standing, free, upright."""
+        self._note_request()
+        self._require_walking_policy()
+        self._require_camera()
+        self._require_not_seated("sitting, stand up first")
+        self._require_no_trick()
+        self._require_not_fallen()
+
+        self._enqueue(GoToBallCmd())
+
+        return {"going": True}
 
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""

@@ -33,6 +33,7 @@ from bridge.state import (  # noqa: E402
     FaceBallCmd,
     FollowBallCmd,
     GestureCmd,
+    GoToBallCmd,
     LookCmd,
     PostureCmd,
     ResetCmd,
@@ -654,6 +655,41 @@ class TestFaceBallState:
             state.submit_face_ball()
 
 
+class TestGoToBallState:
+    def test_go_to_ball_is_queued(self):
+        state, _ = _pair(camera=True)
+        assert state.submit_go_to_ball() == {"going": True}
+        assert state.drain() == [GoToBallCmd()]
+
+    def test_go_to_ball_without_a_camera_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError, match="no head camera"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_without_a_walking_policy_is_rejected(self):
+        state, _ = _pair(walking=False, camera=True)
+        with pytest.raises(ValueError, match="no walking policy"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, camera=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"trick": "kicking"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_while_fallen_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"fallen": True})
+        with pytest.raises(ValueError, match="fallen, get up first"):
+            state.submit_go_to_ball()
+
+
 class TestAvailableActions:
     def test_walking_policy_offers_walk_look_and_both_gestures(self):
         actions = available_actions(FakePolicy())
@@ -699,6 +735,10 @@ class TestAvailableActions:
     def test_face_ball_follows_the_camera(self):
         assert available_actions(FakePolicy())["face ball"] is False
         assert available_actions(FakePolicy(camera=True))["face ball"] is True
+
+    def test_go_to_ball_follows_the_camera(self):
+        assert available_actions(FakePolicy())["go to ball"] is False
+        assert available_actions(FakePolicy(camera=True))["go to ball"] is True
 
 
 class TestBrainWatchdog:
@@ -1369,3 +1409,14 @@ class TestBridgeServer:
             _post(f"{url}/face_ball", {})
         assert excinfo.value.code == 400
         assert state.drain() == []
+
+    def test_go_to_ball_roundtrip(self):
+        with _served(FakePolicy(camera=True)) as (state, url):
+            assert _post(f"{url}/go_to_ball", {}) == (200, {"going": True})
+            assert state.drain() == [GoToBallCmd()]
+
+    def test_go_to_ball_without_a_camera_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/go_to_ball", {})
+        assert excinfo.value.code == 400
