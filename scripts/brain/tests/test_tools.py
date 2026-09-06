@@ -544,6 +544,17 @@ def test_kick_still_kicks_when_the_look_is_rejected(monkeypatch):
     assert result["looked"] is False
 
 
+def test_kick_returns_at_once_when_the_first_status_read_fails(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [{"error": "bridge unreachable"}])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result == {"error": "bridge unreachable"}
+    assert _commands(received) == []
+
+
 def test_kick_passes_a_failed_status_read_after_the_kick_through(monkeypatch):
     _received, server = _scripted_bridge(monkeypatch, [_in_reach(), {"error": "bridge unreachable"}])
     try:

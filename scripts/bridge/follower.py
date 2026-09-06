@@ -56,6 +56,7 @@ def ball_bearing(yaw: float, sighting: BallSighting | None) -> float:
 
 def ball_side(head_yaw: float, sighting: BallSighting | None) -> str | None:
     """Which side of the robot the ball is on, or None while no ball is in view.
+
     Reads the head yaw, not one picture: it smooths many pictures, a single
     picture's x is not steady this close to the ball.
     """

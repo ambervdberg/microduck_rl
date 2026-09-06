@@ -526,12 +526,13 @@ class TestKickState:
         assert state.submit_kick(AUTO_FOOT) == {"trick": "kick_right"}
         assert state.drain() == [TrickCmd("kick_right")]
 
-    def test_auto_foot_with_no_ball_in_view_is_rejected(self):
+    def test_auto_foot_with_no_ball_side_key_falls_back_to_the_right_foot(self):
         state, _ = _pair(kick_right=True, kick_left=True)
-        with pytest.raises(ValueError, match="no ball in view, say which foot to kick with"):
-            state.submit_kick(AUTO_FOOT)
-        assert state.drain() == []
+        assert state.submit_kick(AUTO_FOOT) == {"trick": "kick_right"}
+        assert state.drain() == [TrickCmd("kick_right")]
 
+    def test_auto_foot_with_ball_side_none_is_rejected(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
         state.set_status({"ball_side": None})
         with pytest.raises(ValueError, match="no ball in view, say which foot to kick with"):
             state.submit_kick(AUTO_FOOT)

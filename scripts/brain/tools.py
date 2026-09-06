@@ -73,7 +73,8 @@ SIT_SETTLE_S = 2.5
 # How long a look takes to settle, so two looks in a row are both visible.
 LOOK_SETTLE_S = 1.0
 
-# How long each trick runs, matching the bridge timers.
+# How long each trick runs. A bridge kick adds a 0.4 s lead to bring the head
+# home first, the margin below covers it.
 ROLL_SECONDS = 2.0
 GET_UP_SECONDS = 3.0
 KICK_SECONDS = 1.5
@@ -344,12 +345,16 @@ def kick(foot: str = "auto") -> str:
     camera on to find the ball. Do not call new_ball before a kick on your own,
     the user asks for a ball.
     """
-    status = json.loads(_get("/status"))
+    status, error = _status_or_error()
+    if error:
+        return error
     looked = False
 
     if not status.get("ball_seen"):
         looked = _look_for_ball()
-        status = json.loads(_get("/status"))
+        status, error = _status_or_error()
+        if error:
+            return error
 
     walked_up = False
 
@@ -364,11 +369,19 @@ def kick(foot: str = "auto") -> str:
     if "error" in echo:
         return reply
 
-    status = json.loads(_get("/status"))
-    if "error" in status:
-        return json.dumps(status)
+    status, error = _status_or_error()
+    if error:
+        return error
 
     return _kick_reply(echo, status, walked_up, looked)
+
+
+def _status_or_error() -> tuple[dict, str | None]:
+    """Read /status. On a bridge error, return the reply to return early instead."""
+    status = json.loads(_get("/status"))
+    if "error" in status:
+        return status, json.dumps(status)
+    return status, None
 
 
 def _look_for_ball() -> bool:

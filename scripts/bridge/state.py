@@ -346,7 +346,14 @@ class BridgeState:
         if foot != AUTO_FOOT:
             return _checked_foot(foot)
 
-        ball_side = self.peek_status().get("ball_side")
+        status = self.peek_status()
+
+        # No key at all means a runner with no ball vision, default to the right foot.
+        # A key present but None means a camera that sees no ball, keep raising.
+        if "ball_side" not in status:
+            return "right"
+
+        ball_side = status.get("ball_side")
 
         if ball_side is None:
             raise ValueError("no ball in view, say which foot to kick with")
