@@ -34,6 +34,9 @@ GROUND_PICK_SECONDS = 4.0
 # The feet a kick or a new ball can name.
 FEET = ("right", "left")
 
+# Kick foot value that picks the side the ball is on.
+AUTO_FOOT = "auto"
+
 # What /status reports while no trick is running.
 NO_TRICK = "none"
 
@@ -330,8 +333,20 @@ class BridgeState:
         return {"trick": name}
 
     def submit_kick(self, foot="right") -> dict:
-        """Queue a kick with one foot. The ball is not checked: with no ball the kick swings at air."""
-        return self.submit_trick(f"kick_{_checked_foot(foot)}")
+        """Queue a kick with one foot, or "auto" for the foot on the ball's side."""
+        return self.submit_trick(f"kick_{self._kick_foot(foot)}")
+
+    def _kick_foot(self, foot) -> str:
+        """Resolve "auto" to the ball's side. Any other value is a plain foot name."""
+        if foot != AUTO_FOOT:
+            return _checked_foot(foot)
+
+        ball_side = self.peek_status().get("ball_side")
+
+        if ball_side is None:
+            raise ValueError("no ball in view, say which foot to kick with")
+
+        return ball_side
 
     def submit_ball(self, foot="right") -> dict:
         """Queue a new ball in front of one foot. That foot's kick policy is what proves a ball exists."""

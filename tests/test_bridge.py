@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from gestures import default_gestures  # noqa: E402
 
 from bridge.state import (  # noqa: E402
+    AUTO_FOOT,
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
     GROUND_PICK_SECONDS,
@@ -506,6 +507,34 @@ class TestKickState:
         assert TRICKS["kick_right"].seconds == KICK_SECONDS
         assert TRICKS["kick_left"].seconds == KICK_SECONDS
         assert TRICKS["kick_right"].status == "kicking"
+
+    def test_auto_foot_kicks_the_side_the_ball_is_on(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        state.set_status({"ball_side": "left"})
+        assert state.submit_kick(AUTO_FOOT) == {"trick": "kick_left"}
+        assert state.drain() == [TrickCmd("kick_left")]
+
+        state.set_status({"ball_side": "right"})
+        assert state.submit_kick(AUTO_FOOT) == {"trick": "kick_right"}
+        assert state.drain() == [TrickCmd("kick_right")]
+
+    def test_auto_foot_with_no_ball_in_view_is_rejected(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        with pytest.raises(ValueError, match="no ball in view, say which foot to kick with"):
+            state.submit_kick(AUTO_FOOT)
+        assert state.drain() == []
+
+        state.set_status({"ball_side": None})
+        with pytest.raises(ValueError, match="no ball in view, say which foot to kick with"):
+            state.submit_kick(AUTO_FOOT)
+        assert state.drain() == []
+
+    def test_auto_foot_without_that_foots_policy_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        state.set_status({"ball_side": "left"})
+        with pytest.raises(ValueError, match="no kick_left policy loaded, start the runner with --kick-left"):
+            state.submit_kick(AUTO_FOOT)
+        assert state.drain() == []
 
 
 class TestBallState:
@@ -1344,6 +1373,12 @@ class TestBridgeServer:
             assert _post(f"{url}/kick", {}) == (200, {"trick": "kick_right"})
             assert state.drain() == [TrickCmd("kick_right")]
             assert _post(f"{url}/kick", {"foot": "left"}) == (200, {"trick": "kick_left"})
+            assert state.drain() == [TrickCmd("kick_left")]
+
+    def test_kick_roundtrip_with_auto_foot_uses_the_balls_side(self):
+        with _served(FakePolicy(kick_right=True, kick_left=True)) as (state, url):
+            state.set_status({"ball_side": "left"})
+            assert _post(f"{url}/kick", {"foot": "auto"}) == (200, {"trick": "kick_left"})
             assert state.drain() == [TrickCmd("kick_left")]
 
     def test_ball_roundtrip(self):
