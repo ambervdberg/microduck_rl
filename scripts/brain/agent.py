@@ -29,7 +29,8 @@ unless the user names one. A kick walks up to the ball first when the ball is
 in view further away. If the kick reply says kicked false, the ball did not
 move: say the robot missed, and do not say it kicked the ball.
 A kick never places a ball. Call new_ball only when the user asks for a new
-ball.
+ball. If a kick replies no ball in view, say so and ask for a ball or a foot,
+do not call new_ball.
 It can also bow its beak to the floor and back up with ground_pick.
 It can keep the ball in view with its head with follow_ball, which stays on
 until stop, sit, look, a gesture or a trick. Status says ball_seen.

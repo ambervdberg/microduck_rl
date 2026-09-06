@@ -82,6 +82,9 @@ GROUND_PICK_SECONDS = 4.0
 # How far the ball must travel for a kick to count as landed, in metres.
 KICK_TRAVEL_M = 0.3
 
+# How long a kick looks for the ball: the head camera needs a few pictures to find it.
+LOOK_FOR_BALL_S = 3.0
+
 # Extra wait on top of the trick seconds. Sim time in the viewer runs slower than wall time.
 TRICK_WAIT_MARGIN_S = 4.0
 
@@ -332,17 +335,25 @@ def get_up() -> str:
 
 @tool
 def kick(foot: str = "auto") -> str:
-    """Kick the ball, walking up to it first when it is in view further away.
+    """Kick the ball, looking for it and walking up to it first when it is not already at a foot.
 
     foot: 'auto' lets the robot kick with the foot the ball is on, 'left' or
-    'right' pick one. The robot must be standing and free. The reply says
-    kicked true only when the ball moved, travel in metres, and walked_up true
-    when the robot walked to the ball first. Do not call new_ball before a
-    kick on your own, the user asks for a ball.
+    'right' pick one. The robot must be standing and free. The reply says foot,
+    kicked true only when the ball moved, travel in metres, walked_up true when
+    the robot walked to the ball first, and looked true when it turned the head
+    camera on to find the ball. Do not call new_ball before a kick on your own,
+    the user asks for a ball.
     """
+    status = json.loads(_get("/status"))
+    looked = False
+
+    if not status.get("ball_seen"):
+        looked = _look_for_ball()
+        status = json.loads(_get("/status"))
+
     walked_up = False
 
-    if _ball_far(json.loads(_get("/status"))):
+    if _ball_far(status):
         approach = _walk_up()
         if "error" in approach:
             return json.dumps(approach)
@@ -353,7 +364,29 @@ def kick(foot: str = "auto") -> str:
     if "error" in echo:
         return reply
 
-    return _kick_reply(echo, json.loads(_get("/status")), walked_up)
+    status = json.loads(_get("/status"))
+    if "error" in status:
+        return json.dumps(status)
+
+    return _kick_reply(echo, status, walked_up, looked)
+
+
+def _look_for_ball() -> bool:
+    """Turn the head camera on and wait for the ball to show up. True when the follow started.
+
+    The bridge only knows where the ball is while a follow runs, so a kick out
+    of the blue has to start one.
+    """
+    if "error" in json.loads(_post("/follow_ball", {})):
+        return False
+
+    deadline = time.monotonic() + LOOK_FOR_BALL_S
+
+    while time.monotonic() < deadline:
+        if _poll_status().get("ball_seen"):
+            break
+
+    return True
 
 
 def _ball_far(status: dict) -> bool:
@@ -366,12 +399,13 @@ def _walk_up() -> dict:
     return json.loads(_post_and_wait_for("/go_to_ball", "approach", APPROACH_OVER, GO_TO_BALL_MAX_WAIT_S))
 
 
-def _kick_reply(echo: dict, status: dict, walked_up: bool) -> str:
+def _kick_reply(echo: dict, status: dict, walked_up: bool, looked: bool) -> str:
     """Build the kick reply from the trick the bridge ran and the status after it."""
     travel = float(status.get("last_kick_travel") or 0.0)
     foot = str(echo.get("trick") or "").removeprefix("kick_")
 
-    return json.dumps({"foot": foot, "kicked": travel > KICK_TRAVEL_M, "travel": travel, "walked_up": walked_up})
+    return json.dumps({"foot": foot, "kicked": travel > KICK_TRAVEL_M, "travel": travel, "walked_up": walked_up,
+                       "looked": looked})
 
 
 @tool
