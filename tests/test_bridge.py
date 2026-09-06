@@ -23,6 +23,7 @@ from bridge.state import (  # noqa: E402
     GROUND_PICK_SECONDS,
     HEAD_PITCH_MAX,
     HEAD_YAW_MAX,
+    KICK_LEAD_S,
     KICK_SECONDS,
     RISE_SECONDS,
     ROLL_SECONDS,
@@ -507,6 +508,13 @@ class TestKickState:
         assert TRICKS["kick_right"].seconds == KICK_SECONDS
         assert TRICKS["kick_left"].seconds == KICK_SECONDS
         assert TRICKS["kick_right"].status == "kicking"
+
+    def test_only_a_kick_leads_with_the_walking_policy(self):
+        assert TRICKS["kick_right"].lead_s == KICK_LEAD_S
+        assert TRICKS["kick_left"].lead_s == KICK_LEAD_S
+        assert TRICKS["roll"].lead_s == 0.0
+        assert TRICKS["get_up"].lead_s == 0.0
+        assert TRICKS["ground_pick"].lead_s == 0.0
 
     def test_auto_foot_kicks_the_side_the_ball_is_on(self):
         state, _ = _pair(kick_right=True, kick_left=True)

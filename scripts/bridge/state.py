@@ -31,6 +31,10 @@ GET_UP_SECONDS = 3.0
 KICK_SECONDS = 1.5
 GROUND_PICK_SECONDS = 4.0
 
+# Seconds of walking on a zero command before a kick swings.
+# The kick policy was trained with the head near rest, so the head has to come home first.
+KICK_LEAD_S = 0.4
+
 # The feet a kick or a new ball can name.
 FEET = ("right", "left")
 
@@ -115,14 +119,15 @@ class Trick:
     seconds: float
     status: str
     flag: str
+    lead_s: float = 0.0  # seconds the walking policy holds a zero command first
 
 
 # Trick name the API speaks -> everything the bridge needs to run and report it.
 TRICKS = {
     "roll": Trick("roulade_session", "roulade", ROLL_SECONDS, "rolling", "--roulade"),
     "get_up": Trick("standup_session", "standup", GET_UP_SECONDS, "getting_up", "--standup"),
-    "kick_right": Trick("kick_right_session", "kick_right", KICK_SECONDS, "kicking", "--kick-right"),
-    "kick_left": Trick("kick_left_session", "kick_left", KICK_SECONDS, "kicking", "--kick-left"),
+    "kick_right": Trick("kick_right_session", "kick_right", KICK_SECONDS, "kicking", "--kick-right", KICK_LEAD_S),
+    "kick_left": Trick("kick_left_session", "kick_left", KICK_SECONDS, "kicking", "--kick-left", KICK_LEAD_S),
     "ground_pick": Trick("ground_pick_session", "ground_pick", GROUND_PICK_SECONDS, "picking", "--ground-pick"),
 }
 

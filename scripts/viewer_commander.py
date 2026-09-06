@@ -127,6 +127,7 @@ class ViewerCommander:
         self._rise_until = 0.0
         self._trick: str | None = None
         self._trick_started = 0.0
+        self._trick_from = 0.0
         self._trick_until = 0.0
         self._following = False
         self._follower: BallFollower | None = None
@@ -168,7 +169,7 @@ class ViewerCommander:
 
     def active_policy(self) -> str:
         """Which loaded ONNX drives the robot right now."""
-        if self._trick is not None:
+        if self._trick_policy_runs():
             return self._trick
 
         return "sit" if self._posture in ("sitting", "rising") else "walking"
@@ -240,12 +241,13 @@ class ViewerCommander:
             self._posture = "standing"
 
     def _start_trick(self, name: str) -> None:
-        """Hand the robot to a trick policy on an all-zero command block."""
+        """Hand the robot to a trick policy on an all-zero command block, once its lead is over."""
         self._clear_commands()
         self._note_kick_start(name)
         self._trick = name
         self._trick_started = self._time
-        self._trick_until = self._time + TRICKS[name].seconds
+        self._trick_from = self._time + TRICKS[name].lead_s
+        self._trick_until = self._trick_from + TRICKS[name].seconds
 
     def _expire_trick(self) -> None:
         """The trick is over: the walking policy takes over on a zero twist."""
@@ -256,12 +258,17 @@ class ViewerCommander:
     def _clear_trick(self) -> None:
         """Drop the trick timer and its kick record, and report no trick again."""
         self._trick = None
+        self._trick_from = 0.0
         self._trick_until = 0.0
         self._kick_from = None
 
     def _trick_runs(self) -> bool:
-        """True while a trick policy owns the robot."""
+        """True while a trick owns the robot, its lead included."""
         return self._trick is not None
+
+    def _trick_policy_runs(self) -> bool:
+        """True once the lead is over and the trick policy itself drives the robot."""
+        return self._trick is not None and self._time >= self._trick_from
 
     def _trick_status(self) -> str:
         """The running trick under the name /status speaks, or "none"."""

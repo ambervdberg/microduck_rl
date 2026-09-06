@@ -26,6 +26,7 @@ from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
     GROUND_PICK_SECONDS,
+    KICK_LEAD_S,
     KICK_SECONDS,
     NO_TRICK,
     ROLL_SECONDS,
@@ -586,18 +587,46 @@ def test_kick_is_offered_only_with_its_own_policy():
 def test_kick_swaps_to_its_own_policy_and_zeroes_the_command():
     env, state, commander = _setup(kick_right=True)
     state.submit_kick("right")
-    commander.tick()
+    _tick_for(commander, KICK_LEAD_S)
     assert commander.active_policy() == "kick_right"
     assert _twist(env) == [0.0, 0.0, 0.0]
     assert _head(env) == [0.0, 0.0, 0.0, 0.0]
     assert state.get_status()["trick"] == "kicking"
 
 
+def test_a_kick_walks_on_a_zero_command_before_the_swing():
+    env, state, commander = _setup(kick_right=True)
+    state.submit_kick("right")
+    commander.tick()
+    assert commander.active_policy() == "walking"
+    assert state.get_status()["trick"] == "kicking"
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_the_kick_policy_waits_out_the_lead():
+    _env, state, commander = _setup(kick_right=True)
+    state.submit_kick("right")
+    _tick_for(commander, KICK_LEAD_S - 4 * DT)
+    assert commander.active_policy() == "walking"
+    _tick_for(commander, 4 * DT)
+    assert commander.active_policy() == "kick_right"
+
+
+def test_a_walk_during_the_kick_lead_is_refused():
+    _env, state, commander = _setup(kick_right=True)
+    state.submit_kick("right")
+    commander.tick()
+    with pytest.raises(ValueError, match="trick is running"):
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+
+
 def test_kick_hands_back_to_walking_at_the_timer():
     _env, state, commander = _setup(kick_left=True)
     state.submit_kick("left")
-    commander.tick()
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS - 4 * DT)
+    assert state.get_status()["trick"] == "kicking"
+    _tick_for(commander, 4 * DT)
     assert commander.active_policy() == "walking"
     assert state.get_status()["trick"] == NO_TRICK
 
@@ -829,7 +858,7 @@ def test_a_trick_ends_the_follow():
     state.submit_kick("right")
     commander.tick()
     assert state.get_status()["following"] is False
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
     assert state.get_status()["following"] is False
 
 
@@ -1320,7 +1349,7 @@ def test_a_kick_reports_how_far_it_sent_the_ball():
     state.submit_kick("right")
     commander.tick()
     _place_the_ball(env, 1.3, 2.4)
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
     assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
 
 
@@ -1330,12 +1359,12 @@ def test_a_second_kick_overwrites_the_travel():
     state.submit_kick("right")
     commander.tick()
     _place_the_ball(env, 1.3, 2.4)
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
 
     state.submit_kick("right")
     commander.tick()
     _place_the_ball(env, 1.4, 2.4)
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
     assert state.get_status()["last_kick_travel"] == pytest.approx(0.1)
 
 
@@ -1345,7 +1374,7 @@ def test_a_roll_leaves_the_kick_travel_alone():
     state.submit_kick("right")
     commander.tick()
     _place_the_ball(env, 1.3, 2.4)
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
 
     state.submit_trick("roll")
     commander.tick()
@@ -1371,7 +1400,7 @@ def test_a_reset_during_a_kick_keeps_the_travel_of_the_kick_before_it():
     state.submit_kick("right")
     commander.tick()
     _place_the_ball(env, 1.3, 2.4)
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
 
     state.submit_kick("right")
     commander.tick()
