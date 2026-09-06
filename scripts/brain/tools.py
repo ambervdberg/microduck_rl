@@ -92,8 +92,9 @@ TRICK_WAIT_MARGIN_S = 4.0
 # Wait cap for a face: a full hunt circle at HUNT_RATE plus the turn, in slow viewer time.
 FACE_MAX_WAIT_S = 25.0
 
-# Wait cap for a walk to the ball: the bridge gives up at 20 s of sim time, the viewer runs slower.
-GO_TO_BALL_MAX_WAIT_S = 30.0
+# Wait cap for a walk to the ball. The bridge gives up at 20 s of sim time,
+# which is about 33 s of wall time in the slower viewer.
+GO_TO_BALL_MAX_WAIT_S = 40.0
 
 # Approach values that mean the walk to the ball is over.
 APPROACH_OVER = ("arrived", "gave_up", "none")
@@ -342,8 +343,9 @@ def kick(foot: str = "auto") -> str:
     'right' pick one. The robot must be standing and free. The reply says foot,
     kicked true only when the ball moved, travel in metres, walked_up true when
     the robot walked to the ball first, and looked true when it turned the head
-    camera on to find the ball. Do not call new_ball before a kick on your own,
-    the user asks for a ball.
+    camera on to find the ball. When the walk to the ball did not arrive, the
+    reply is that walk instead, with approach gave_up, lost or walking and no
+    kick. Do not call new_ball before a kick on your own, the user asks for a ball.
     """
     status, error = _status_or_error()
     if error:
@@ -360,8 +362,11 @@ def kick(foot: str = "auto") -> str:
 
     if _ball_far(status):
         approach = _walk_up()
-        if "error" in approach:
+
+        # Anything but arrived means the robot is not at the ball, so no swing.
+        if approach.get("approach") != "arrived":
             return json.dumps(approach)
+
         walked_up = True
 
     reply = _post_trick("/kick", KICK_SECONDS, {"foot": foot})

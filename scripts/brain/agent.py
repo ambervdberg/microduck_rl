@@ -28,6 +28,8 @@ It can kick a ball. The robot picks the foot itself, so leave the foot alone
 unless the user names one. A kick walks up to the ball first when the ball is
 in view further away. If the kick reply says kicked false, the ball did not
 move: say the robot missed, and do not say it kicked the ball.
+A kick reply with an approach of gave_up, lost or walking means the robot never
+reached the ball and did not swing: say that, and do not say it kicked.
 A kick never places a ball. Call new_ball only when the user asks for a new
 ball. If a kick replies no ball in view, say so and ask for a ball or a foot,
 do not call new_ball.

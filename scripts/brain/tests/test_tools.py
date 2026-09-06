@@ -492,6 +492,29 @@ def test_kick_walks_up_first_when_the_ball_is_seen_further_away(monkeypatch):
     assert result["walked_up"] is True
 
 
+def test_kick_skips_the_swing_when_the_walk_up_gave_up(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=True), _ball(seen=True, approach="gave_up")])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/go_to_ball"]
+    assert result["approach"] == "gave_up"
+
+
+def test_kick_skips_the_swing_when_the_walk_up_is_still_walking(monkeypatch):
+    monkeypatch.setattr(tools, "GO_TO_BALL_MAX_WAIT_S", 1.0)
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=True), _ball(seen=True, approach="walking")])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/go_to_ball"]
+    assert result["approach"] == "walking"
+
+
 def test_kick_does_not_walk_up_or_look_when_the_ball_is_already_close(monkeypatch):
     received, server = _scripted_bridge(monkeypatch, [_in_reach(travel=0.5)])
     try:
