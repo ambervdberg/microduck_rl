@@ -319,8 +319,16 @@ class ViewerCommander:
         return float(pos[0]), float(pos[1])
 
     def _note_kick_start(self, name: str) -> None:
-        """Where the ball lies as a kick starts. Any other trick records nothing."""
-        self._kick_from = self._ball_xy() if name.startswith("kick_") else None
+        """Where the ball lies as a kick starts. Any other trick records nothing.
+
+        A new kick drops the old travel, so a kick cut short reports none of its own.
+        """
+        if not name.startswith("kick_"):
+            self._kick_from = None
+            return
+
+        self._kick_from = self._ball_xy()
+        self._last_kick_travel = None
 
     def _note_kick_end(self) -> None:
         """How far the ball moved while the kick ran, in metres. Only a kick that ran its time reports."""
