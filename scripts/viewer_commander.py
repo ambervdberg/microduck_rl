@@ -11,7 +11,8 @@ A face steers the body on the ball's bearing, head yaw plus where the ball sits 
 and writes the turn rate into the twist yaw slot with zero forward speed.
 While the ball is out of view a face turns the body a full circle to look for it, then gives
 up and reports lost. An approach adds the forward speed to the twist while the face turns
-the body.
+the body. The status says which side the ball is on, whether it is close enough to kick,
+and how far the last kick sent it.
 """
 from __future__ import annotations
 
@@ -21,7 +22,15 @@ from dataclasses import dataclass, field
 import torch
 
 from bridge.ball_finder import BallSighting, find_ball
-from bridge.follower import BallApproach, BallFollower, BallHunt, BodyTurner, ball_bearing
+from bridge.follower import (
+    BallApproach,
+    BallFollower,
+    BallHunt,
+    BodyTurner,
+    ball_bearing,
+    ball_close,
+    ball_side,
+)
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
@@ -129,6 +138,9 @@ class ViewerCommander:
         self._speed = 0.0
         self._hunt: BallHunt | None = None
         self._lost = False
+        self._bearing = 0.0
+        self._kick_from: tuple[float, float] | None = None
+        self._last_kick_travel: float | None = None
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
@@ -230,6 +242,7 @@ class ViewerCommander:
     def _start_trick(self, name: str) -> None:
         """Hand the robot to a trick policy on an all-zero command block."""
         self._clear_commands()
+        self._note_kick_start(name)
         self._trick = name
         self._trick_started = self._time
         self._trick_until = self._time + TRICKS[name].seconds
@@ -241,6 +254,7 @@ class ViewerCommander:
 
     def _clear_trick(self) -> None:
         """Drop the trick timer and report no trick again."""
+        self._note_kick_end()
         self._trick = None
         self._trick_until = 0.0
 
@@ -290,6 +304,30 @@ class ViewerCommander:
         ball.write_root_link_pose_to_sim(pose)
         ball.write_root_link_velocity_to_sim(torch.zeros(1, 6, device=self._env.device))
 
+    def _ball_xy(self) -> tuple[float, float] | None:
+        """The ball's world x, y, or None when the scene has no ball."""
+        try:
+            pos = self._env.scene["ball"].data.root_link_pos_w[0]
+        except KeyError:
+            return None
+
+        return float(pos[0]), float(pos[1])
+
+    def _note_kick_start(self, name: str) -> None:
+        """Where the ball lies as a kick starts. Any other trick records nothing."""
+        self._kick_from = self._ball_xy() if name.startswith("kick_") else None
+
+    def _note_kick_end(self) -> None:
+        """How far the ball moved while the kick ran, in metres."""
+        start = self._kick_from
+        self._kick_from = None
+
+        if start is None:
+            return
+
+        x, y = self._ball_xy()
+        self._last_kick_travel = round(math.hypot(x - start[0], y - start[1]), 3)
+
     # Follow ball.
 
     def _start_follow(self) -> None:
@@ -305,6 +343,7 @@ class ViewerCommander:
         self._stop_face()
         self._following = False
         self._follower = None
+        self._bearing = 0.0
 
     def _follow_tick(self) -> None:
         """Every PICTURE_EVERY ticks: read the picture, find the ball, move the head toward it."""
@@ -320,7 +359,8 @@ class ViewerCommander:
         sighting = find_ball(self._picture())
         pitch, yaw = self._follower.update(sighting, self._head[HEAD_PITCH], self._head[HEAD_YAW])
         self._head = [0.0, pitch, yaw, 0.0]
-        self._turn_tick(ball_bearing(yaw, sighting))
+        self._bearing = ball_bearing(yaw, sighting)
+        self._turn_tick(self._bearing)
         self._approach_tick(sighting, pitch)
 
     def _picture(self):
@@ -542,6 +582,9 @@ class ViewerCommander:
             "following": self._following,
             "ball_seen": self._sighting() is not None,
             "ball": self._ball_status(),
+            "ball_side": ball_side(self._bearing, self._sighting()),
+            "ball_close": ball_close(self._sighting(), self._head[HEAD_PITCH]),
+            "last_kick_travel": self._last_kick_travel,
             "searching": self._searching(),
             "facing": self._facing,
             "turning": self._turning(),

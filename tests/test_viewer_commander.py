@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 from bridge.follower import (
     APPROACH_SPEED,
     ARRIVE_PITCH,
+    CLOSE_PITCH_MARGIN,
     FACE_START,
     FACE_STOP,
     FACE_TURN_MIN,
@@ -74,12 +75,20 @@ class _Robot:
         root_link_quat_w = torch.tensor([[0.7071068, 0.0, 0.0, 0.7071068]])
 
 
+class _BallData:
+    """The one field the commander reads off a ball, as the sim reports it."""
+
+    def __init__(self):
+        self.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.03]])
+
+
 class _Ball:
-    """Records the root writes the commander makes."""
+    """Records the root writes the commander makes, and reports a world position."""
 
     def __init__(self):
         self.poses = []
         self.velocities = []
+        self.data = _BallData()
 
     def write_root_link_pose_to_sim(self, pose, env_ids=None):
         self.poses.append(pose[0].tolist())
@@ -1263,3 +1272,83 @@ def test_a_hunt_that_gives_up_ends_the_approach_with_lost():
     assert status["at_ball"] is False
     assert status["facing"] is False
     assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def _place_the_ball(env, x, y):
+    """Put the fake ball at a world spot, the way the sim would report it."""
+    env.scene["ball"].data.root_link_pos_w = torch.tensor([[x, y, 0.03]])
+
+
+def test_status_has_no_ball_side_and_no_kick_travel_before_anything_runs():
+    _env, state, commander = _setup(kick_right=True, camera=True)
+    commander.tick()
+    status = state.get_status()
+    assert status["ball_side"] is None
+    assert status["ball_close"] is False
+    assert status["last_kick_travel"] is None
+
+
+def test_a_ball_left_of_the_picture_centre_is_on_the_left():
+    _env, state, commander = _following_setup(col=40, row=60)
+    _pictures(commander, 1)
+    assert state.get_status()["ball_side"] == "left"
+
+
+def test_a_ball_right_of_the_picture_centre_is_on_the_right():
+    _env, state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    assert state.get_status()["ball_side"] == "right"
+
+
+def test_a_ball_at_the_kick_spot_reads_as_close():
+    env, state, commander = _going_setup(col=80, row=118)
+    _pictures(commander, 12)
+    assert _head(env)[HEAD_PITCH] >= ARRIVE_PITCH
+    assert state.get_status()["ball_close"] is True
+
+
+def test_a_ball_the_head_barely_looks_down_at_is_not_close():
+    env, state, commander = _following_setup(col=80, row=60)
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_PITCH] < ARRIVE_PITCH - CLOSE_PITCH_MARGIN
+    assert state.get_status()["ball_close"] is False
+
+
+def test_a_kick_reports_how_far_it_sent_the_ball():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_SECONDS)
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
+
+
+def test_a_second_kick_overwrites_the_travel():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_SECONDS)
+
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.4, 2.4)
+    _tick_for(commander, KICK_SECONDS)
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.1)
+
+
+def test_a_roll_leaves_the_kick_travel_alone():
+    env, state, commander = _setup(kick_right=True, roll=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_SECONDS)
+
+    state.submit_trick("roll")
+    commander.tick()
+    _place_the_ball(env, 5.0, 5.0)
+    _tick_for(commander, ROLL_SECONDS)
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)

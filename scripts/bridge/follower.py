@@ -7,6 +7,7 @@ Head signs: positive pitch looks down, positive yaw looks left.
 BodyTurner turns the ball's bearing into a body turn rate for the face ball skill.
 BallHunt turns the body a full circle while the ball is out of view, then gives up.
 BallApproach picks the forward speed for the go to ball skill and says when the robot is there.
+ball_side and ball_close read the same sighting for the status the brain sees.
 """
 
 import math
@@ -29,6 +30,7 @@ FACE_TURN_MIN = 0.3   # rad/s, the smallest turn the walk policy actually makes
 APPROACH_SPEED = 0.15  # m/s, the slow walk that is measured to work
 ARRIVE_PITCH = 1.05    # rad of head pitch with the ball about 0.10 m ahead, where a kick reaches, measured in sim
 ARRIVE_SIZE = 1100     # orange pixels in the 160 by 120 picture at that distance, the backup when the pitch cap comes first
+CLOSE_PITCH_MARGIN = 0.15  # rad of head pitch under the arrival pitch that still counts as close to the ball
 GIVE_UP_S = 20.0       # walking longer than this means the ball is not reachable
 
 HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
@@ -50,6 +52,22 @@ def ball_bearing(yaw: float, sighting: BallSighting | None) -> float:
         return yaw
 
     return yaw - math.atan(sighting.x * TAN_HALF_WIDTH)
+
+
+def ball_side(bearing: float, sighting: BallSighting | None) -> str | None:
+    """Which side of the robot the ball is on, or None while no ball is in view."""
+    if sighting is None:
+        return None
+
+    return "left" if bearing > 0.0 else "right"
+
+
+def ball_close(sighting: BallSighting | None, pitch: float) -> bool:
+    """True when the head looks down far enough that the ball is about at the kick spot."""
+    if sighting is None:
+        return False
+
+    return pitch >= ARRIVE_PITCH - CLOSE_PITCH_MARGIN
 
 
 class BallFollower:

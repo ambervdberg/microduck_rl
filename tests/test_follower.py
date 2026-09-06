@@ -13,6 +13,7 @@ from bridge.follower import (
     APPROACH_SPEED,
     ARRIVE_PITCH,
     ARRIVE_SIZE,
+    CLOSE_PITCH_MARGIN,
     DEAD_BAND,
     FACE_GAIN,
     FACE_START,
@@ -31,6 +32,8 @@ from bridge.follower import (
     BallHunt,
     BodyTurner,
     ball_bearing,
+    ball_close,
+    ball_side,
 )
 from bridge.state import HEAD_PITCH_MAX, HEAD_YAW_MAX
 
@@ -334,3 +337,35 @@ def test_give_up_after_the_timeout():
     assert approach.state == "gave_up"
     assert approach.update(_seen(), ARRIVE_PITCH, searching=False, turning=False) == 0.0
     assert approach.state == "gave_up"
+
+
+def test_a_ball_out_of_view_has_no_side():
+    assert ball_side(0.4, None) is None
+
+
+def test_a_positive_bearing_puts_the_ball_on_the_left():
+    assert ball_side(0.4, _seen()) == "left"
+
+
+def test_a_negative_bearing_puts_the_ball_on_the_right():
+    assert ball_side(-0.4, _seen()) == "right"
+
+
+def test_a_ball_straight_ahead_reads_as_the_right_side():
+    assert ball_side(0.0, _seen()) == "right"
+
+
+def test_a_ball_out_of_view_is_never_close():
+    assert ball_close(None, ARRIVE_PITCH) is False
+
+
+def test_a_ball_at_the_close_margin_is_close():
+    assert ball_close(_seen(), ARRIVE_PITCH - CLOSE_PITCH_MARGIN) is True
+
+
+def test_a_ball_just_short_of_the_close_margin_is_not_close():
+    assert ball_close(_seen(), ARRIVE_PITCH - CLOSE_PITCH_MARGIN - 0.01) is False
+
+
+def test_a_ball_at_the_arrival_pitch_is_close():
+    assert ball_close(_seen(), ARRIVE_PITCH) is True
