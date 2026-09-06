@@ -250,13 +250,14 @@ class ViewerCommander:
     def _expire_trick(self) -> None:
         """The trick is over: the walking policy takes over on a zero twist."""
         if self._trick_runs() and self._time >= self._trick_until:
+            self._note_kick_end()
             self._clear_trick()
 
     def _clear_trick(self) -> None:
-        """Drop the trick timer and report no trick again."""
-        self._note_kick_end()
+        """Drop the trick timer and its kick record, and report no trick again."""
         self._trick = None
         self._trick_until = 0.0
+        self._kick_from = None
 
     def _trick_runs(self) -> bool:
         """True while a trick policy owns the robot."""
@@ -304,12 +305,9 @@ class ViewerCommander:
         ball.write_root_link_pose_to_sim(pose)
         ball.write_root_link_velocity_to_sim(torch.zeros(1, 6, device=self._env.device))
 
-    def _ball_xy(self) -> tuple[float, float] | None:
-        """The ball's world x, y, or None when the scene has no ball."""
-        try:
-            pos = self._env.scene["ball"].data.root_link_pos_w[0]
-        except KeyError:
-            return None
+    def _ball_xy(self) -> tuple[float, float]:
+        """The ball's world x, y. Only a kick reads it, and a kick policy always brings a ball."""
+        pos = self._env.scene["ball"].data.root_link_pos_w[0]
 
         return float(pos[0]), float(pos[1])
 
@@ -318,15 +316,12 @@ class ViewerCommander:
         self._kick_from = self._ball_xy() if name.startswith("kick_") else None
 
     def _note_kick_end(self) -> None:
-        """How far the ball moved while the kick ran, in metres."""
-        start = self._kick_from
-        self._kick_from = None
-
-        if start is None:
+        """How far the ball moved while the kick ran, in metres. Only a kick that ran its time reports."""
+        if self._kick_from is None:
             return
 
         x, y = self._ball_xy()
-        self._last_kick_travel = round(math.hypot(x - start[0], y - start[1]), 3)
+        self._last_kick_travel = round(math.hypot(x - self._kick_from[0], y - self._kick_from[1]), 3)
 
     # Follow ball.
 

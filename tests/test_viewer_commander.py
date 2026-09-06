@@ -1352,3 +1352,30 @@ def test_a_roll_leaves_the_kick_travel_alone():
     _place_the_ball(env, 5.0, 5.0)
     _tick_for(commander, ROLL_SECONDS)
     assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
+
+
+def test_a_reset_during_a_kick_reports_no_travel_at_all():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.1, 2.0)
+    state.submit_reset()
+    commander.tick()
+    assert state.get_status()["last_kick_travel"] is None
+
+
+def test_a_reset_during_a_kick_keeps_the_travel_of_the_kick_before_it():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_SECONDS)
+
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.4, 2.4)
+    state.submit_reset()
+    commander.tick()
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
