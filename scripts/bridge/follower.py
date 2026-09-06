@@ -36,8 +36,10 @@ GIVE_UP_S = 20.0       # walking longer than this means the ball is not reachabl
 HUNT_RATE = 0.6               # rad/s of body turn while the ball is out of view
 HUNT_FULL_TURN = 2 * math.pi  # rad of body turn without a sighting, then the hunt gives up
 
-CAMERA_FOVY = 75.0           # deg, vertical field of view. Same as HEAD_CAMERA_CFG in viewer_bridge.py.
-CAMERA_ASPECT = 160 / 120    # picture width over height. Same as HEAD_CAMERA_CFG.
+# Mirrored from HEAD_CAMERA_CFG in viewer_bridge.py, which cannot be imported here.
+# test_viewer_bridge.py pins these two to it.
+CAMERA_FOVY = 75.0           # deg, vertical field of view
+CAMERA_ASPECT = 160 / 120    # picture width over height
 TAN_HALF_WIDTH = math.tan(math.radians(CAMERA_FOVY / 2)) * CAMERA_ASPECT
 
 

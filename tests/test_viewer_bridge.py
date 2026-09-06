@@ -8,6 +8,7 @@ import pytest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
+from bridge.follower import CAMERA_ASPECT, CAMERA_FOVY
 from viewer_bridge import (
     BALL_ROLLING_FRICTION,
     HEAD_CAMERA_CFG,
@@ -181,6 +182,12 @@ def test_the_camera_joins_the_scene_as_a_sensor_on_the_head():
     assert HEAD_CAMERA_CFG.parent_body == "robot/jaw_soft"
     assert HEAD_CAMERA_CFG.enabled_geom_groups == (0,)
     assert (HEAD_CAMERA_CFG.width, HEAD_CAMERA_CFG.height) == (160, 120)
+
+
+def test_the_followers_camera_numbers_match_the_head_camera():
+    # follower.py cannot import viewer_bridge (import cycle), so this test is the tie.
+    assert HEAD_CAMERA_CFG.fovy == CAMERA_FOVY
+    assert HEAD_CAMERA_CFG.width / HEAD_CAMERA_CFG.height == CAMERA_ASPECT
 
 
 def test_no_follow_ball_flag_means_no_camera():
