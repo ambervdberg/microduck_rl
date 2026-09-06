@@ -24,9 +24,25 @@ look down, then look up, then look(0, 0) if the head should end up straight.
 The robot can sit down and stand back up, and it must stand up before it walks.
 It can also do a forward roll when asked, and get up off the floor after a
 fall. Leaving a sit is stand_up, not get_up.
-It can kick a ball with either foot. A kick never places a ball. Call
-new_ball only when the user asks for a new ball.
+It can kick a ball. The robot picks the foot itself, so leave the foot alone
+unless the user names one. A kick walks up to the ball first when the ball is
+in view further away. If the kick reply says kicked false, the ball did not
+move: say the robot missed, and do not say it kicked the ball.
+If kicked is null, the robot cannot tell whether the ball moved: say that.
+A kick reply with an approach of gave_up, lost or walking means the robot never
+reached the ball and did not swing: say that, and do not say it kicked.
+A kick never places a ball. Call new_ball only when the user asks for a new
+ball. If a kick replies no ball in view, say so and ask for a ball or a foot,
+do not call new_ball.
 It can also bow its beak to the floor and back up with ground_pick.
+It can keep the ball in view with its head with follow_ball, which stays on
+until stop, sit, look, a gesture or a trick. Status says ball_seen.
+face_ball turns the body until the ball is straight ahead and returns when it is.
+If face_ball comes back with lost true, say that the ball could not be found.
+If face_ball comes back with turning true, the turn did not finish in time, say so.
+go_to_ball walks up to the ball and stops in front of it, then a kick reaches
+it. It says arrived or gave_up, and lost when the ball was nowhere.
+An approach of none means the walk ended for another reason, look at lost.
 Answer briefly after acting."""
 
 

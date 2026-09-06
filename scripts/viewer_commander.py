@@ -1,10 +1,18 @@
 """Applies bridge commands to a live mjlab env, so the brain can drive the viser viewer.
 
 The bridge (scripts/bridge) queues WalkCmd / LookCmd / GestureCmd / PostureCmd /
-TrickCmd / BallCmd / StopCmd / ResetCmd on a BridgeState. In infer_policy.py a SkillRunner applies them
-to PolicyInference. Here ViewerCommander applies them to the env's command terms
-instead, once per policy step, and publishes the status the bridge serves on /status.
-During a ground pick the twist slots carry the phase encoding the policy was trained on.
+TrickCmd / BallCmd / FollowBallCmd / FaceBallCmd / GoToBallCmd / StopCmd / ResetCmd on a
+BridgeState. In infer_policy.py a SkillRunner applies them to PolicyInference. Here
+ViewerCommander applies them to the env's command terms instead, once per policy step, and
+publishes the status the bridge serves on /status. During a ground pick the twist slots carry
+the phase encoding the policy was trained on. A follow reads the head camera every
+PICTURE_EVERY ticks and steers the head pose slots.
+A face steers the body on the ball's bearing, head yaw plus where the ball sits in the picture,
+and writes the turn rate into the twist yaw slot with zero forward speed.
+While the ball is out of view a face turns the body a full circle to look for it, then gives
+up and reports lost. An approach adds the forward speed to the twist while the face turns
+the body. The status says which side the ball is on, whether it is close enough to kick,
+and how far the last kick sent it.
 """
 from __future__ import annotations
 
@@ -13,6 +21,16 @@ from dataclasses import dataclass, field
 
 import torch
 
+from bridge.ball_finder import BallSighting, find_ball
+from bridge.follower import (
+    BallApproach,
+    BallFollower,
+    BallHunt,
+    BodyTurner,
+    ball_bearing,
+    ball_close,
+    ball_side,
+)
 from bridge.state import (
     GESTURE_KEYS,
     NO_TRICK,
@@ -20,7 +38,10 @@ from bridge.state import (
     TRICKS,
     BallCmd,
     BridgeState,
+    FaceBallCmd,
+    FollowBallCmd,
     GestureCmd,
+    GoToBallCmd,
     LookCmd,
     PostureCmd,
     ResetCmd,
@@ -37,6 +58,12 @@ HEAD_PITCH = 1
 HEAD_YAW = 2
 
 BODY_POSE_SLOTS = 6
+
+# Name of the head camera sensor, also its key in env.scene.
+HEAD_CAMERA = "head_camera"
+
+# Ticks between pictures: 10 pictures per second at the 50 Hz policy rate.
+PICTURE_EVERY = 5
 
 GESTURE_SECONDS = 1.6
 GESTURE_AMPLITUDE_RAD = 0.35
@@ -74,6 +101,7 @@ class ViewerLimits:
     kick_right_session: bool = False  # truthy: a right foot kick policy is loaded
     kick_left_session: bool = False  # truthy: a left foot kick policy is loaded
     ground_pick_session: bool = False  # truthy: a ground pick policy is loaded
+    camera: bool = False  # truthy: a head camera renders in the viewer scene
     gesture_player: _GestureKeys = field(default_factory=_GestureKeys)
 
 
@@ -99,7 +127,21 @@ class ViewerCommander:
         self._rise_until = 0.0
         self._trick: str | None = None
         self._trick_started = 0.0
+        self._trick_from = 0.0
         self._trick_until = 0.0
+        self._following = False
+        self._follower: BallFollower | None = None
+        self._ticks_since_picture = 0
+        self._facing = False
+        self._turner: BodyTurner | None = None
+        self._turn = 0.0
+        self._approach: BallApproach | None = None
+        self._speed = 0.0
+        self._hunt: BallHunt | None = None
+        self._lost = False
+        self._bearing = 0.0
+        self._kick_from: tuple[float, float] | None = None
+        self._last_kick_travel: float | None = None
         self._watchdog = BrainWatchdog(state, control_dt)
         self._actions = available_actions(state.policy())
         self._pin_command_terms()
@@ -120,12 +162,14 @@ class ViewerCommander:
         if self._watchdog.tick():
             self._release()
 
+        self._follow_tick()
+
         self._write_tensors()
         self._publish_status()
 
     def active_policy(self) -> str:
         """Which loaded ONNX drives the robot right now."""
-        if self._trick is not None:
+        if self._trick_policy_runs():
             return self._trick
 
         return "sit" if self._posture in ("sitting", "rising") else "walking"
@@ -141,8 +185,12 @@ class ViewerCommander:
             self._walk(cmd)
         elif isinstance(cmd, LookCmd):
             self._gesture = None
+            self._stop_follow()
             self._head = [0.0, cmd.pitch, cmd.yaw, 0.0]
         elif isinstance(cmd, GestureCmd):
+            if self._following:
+                self._head = [0.0, 0.0, 0.0, 0.0]
+            self._stop_follow()
             self._gesture = _Gesture(cmd.name, self._time)
         elif isinstance(cmd, PostureCmd):
             self._set_posture(cmd.sit)
@@ -150,6 +198,13 @@ class ViewerCommander:
             self._start_trick(cmd.name)
         elif isinstance(cmd, BallCmd):
             self._place_ball(cmd.foot)
+        elif isinstance(cmd, FollowBallCmd):
+            self._stop_face()
+            self._start_follow()
+        elif isinstance(cmd, FaceBallCmd):
+            self._start_face()
+        elif isinstance(cmd, GoToBallCmd):
+            self._start_go_to_ball()
         elif isinstance(cmd, StopCmd):
             self._clear_commands()
         elif isinstance(cmd, ResetCmd):
@@ -163,6 +218,7 @@ class ViewerCommander:
         if self._posture != "standing":
             return
 
+        self._stop_face()
         self._twist = [cmd.vx, cmd.vy, cmd.wz]
         self._walk_until = self._time + cmd.seconds
 
@@ -172,6 +228,7 @@ class ViewerCommander:
             self._posture = "sitting"
             self._twist = [0.0, 0.0, 0.0]
             self._walk_until = 0.0
+            self._stop_follow()
             return
 
         if self._posture == "sitting":
@@ -184,25 +241,34 @@ class ViewerCommander:
             self._posture = "standing"
 
     def _start_trick(self, name: str) -> None:
-        """Hand the robot to a trick policy on an all-zero command block."""
+        """Hand the robot to a trick policy on an all-zero command block, once its lead is over."""
         self._clear_commands()
+        self._note_kick_start(name)
         self._trick = name
         self._trick_started = self._time
-        self._trick_until = self._time + TRICKS[name].seconds
+        self._trick_from = self._time + TRICKS[name].lead_s
+        self._trick_until = self._trick_from + TRICKS[name].seconds
 
     def _expire_trick(self) -> None:
         """The trick is over: the walking policy takes over on a zero twist."""
         if self._trick_runs() and self._time >= self._trick_until:
+            self._note_kick_end()
             self._clear_trick()
 
     def _clear_trick(self) -> None:
-        """Drop the trick timer and report no trick again."""
+        """Drop the trick timer and its kick record, and report no trick again."""
         self._trick = None
+        self._trick_from = 0.0
         self._trick_until = 0.0
+        self._kick_from = None
 
     def _trick_runs(self) -> bool:
-        """True while a trick policy owns the robot."""
+        """True while a trick owns the robot, its lead included."""
         return self._trick is not None
+
+    def _trick_policy_runs(self) -> bool:
+        """True once the lead is over and the trick policy itself drives the robot."""
+        return self._trick is not None and self._time >= self._trick_from
 
     def _trick_status(self) -> str:
         """The running trick under the name /status speaks, or "none"."""
@@ -212,19 +278,22 @@ class ViewerCommander:
         return TRICKS[self._trick].status
 
     def _release(self) -> None:
-        """The brain went quiet: zero the twist and, unless a gesture is playing, the head."""
+        """The brain went quiet: zero the twist and, unless a gesture or a follow runs, the head."""
         self._twist = [0.0, 0.0, 0.0]
         self._walk_until = 0.0
+        self._stop_face()
 
-        if self._gesture is None:
+        if self._gesture is None and not self._following:
             self._head = [0.0, 0.0, 0.0, 0.0]
 
     def _clear_commands(self) -> None:
-        """Zero the twist, the head, the gesture and the walk countdown."""
+        """Zero the twist, the head, the gesture, the walk countdown and any follow."""
         self._twist = [0.0, 0.0, 0.0]
         self._head = [0.0, 0.0, 0.0, 0.0]
         self._gesture = None
         self._walk_until = 0.0
+        self._stop_follow()
+        self._lost = False
 
     # Ball.
 
@@ -242,6 +311,179 @@ class ViewerCommander:
         ball = self._env.scene["ball"]
         ball.write_root_link_pose_to_sim(pose)
         ball.write_root_link_velocity_to_sim(torch.zeros(1, 6, device=self._env.device))
+
+    def _ball_xy(self) -> tuple[float, float]:
+        """The ball's world x, y. Only a kick reads it, and a kick policy always brings a ball."""
+        pos = self._env.scene["ball"].data.root_link_pos_w[0]
+
+        return float(pos[0]), float(pos[1])
+
+    def _note_kick_start(self, name: str) -> None:
+        """Where the ball lies as a kick starts. Any other trick records nothing.
+
+        A new kick drops the old travel, so a kick cut short reports none of its own.
+        """
+        if not name.startswith("kick_"):
+            self._kick_from = None
+            return
+
+        self._kick_from = self._ball_xy()
+        self._last_kick_travel = None
+
+    def _note_kick_end(self) -> None:
+        """How far the ball moved while the kick ran, in metres. Only a kick that ran its time reports."""
+        if self._kick_from is None:
+            return
+
+        x, y = self._ball_xy()
+        self._last_kick_travel = round(math.hypot(x - self._kick_from[0], y - self._kick_from[1]), 3)
+
+    # Follow ball.
+
+    def _start_follow(self) -> None:
+        """The head camera takes over the head. The follower runs at picture rate."""
+        self._gesture = None
+        self._follower = BallFollower(PICTURE_EVERY * self._dt)
+        self._following = True
+        self._ticks_since_picture = 0
+        self._lost = False
+
+    def _stop_follow(self) -> None:
+        """Drop the follower. The head stays where it is until the next command."""
+        self._stop_face()
+        self._following = False
+        self._follower = None
+        self._bearing = 0.0
+
+    def _follow_tick(self) -> None:
+        """Every PICTURE_EVERY ticks: read the picture, find the ball, move the head toward it."""
+        if not self._following or self._is_fallen():
+            self._stop_face()
+            return
+
+        self._ticks_since_picture += 1
+        if self._ticks_since_picture < PICTURE_EVERY:
+            return
+
+        self._ticks_since_picture = 0
+        sighting = find_ball(self._picture())
+        pitch, yaw = self._follower.update(sighting, self._head[HEAD_PITCH], self._head[HEAD_YAW])
+        self._head = [0.0, pitch, yaw, 0.0]
+        self._bearing = ball_bearing(yaw, sighting)
+        self._turn_tick(self._bearing)
+        self._approach_tick(sighting, pitch)
+
+    def _picture(self):
+        """The latest head camera picture as height by width by 3, on the CPU."""
+        return self._env.scene[HEAD_CAMERA].data.rgb[0].cpu().numpy()
+
+    def _sighting(self) -> BallSighting | None:
+        """The ball as of the last picture, or None."""
+        if self._follower is None:
+            return None
+
+        return self._follower.sighting
+
+    def _ball_status(self) -> dict | None:
+        """The latest sighting as x, y and size for /status, or None."""
+        sighting = self._sighting()
+        if sighting is None:
+            return None
+
+        return {"x": round(sighting.x, 3), "y": round(sighting.y, 3), "size": sighting.size}
+
+    def _searching(self) -> bool:
+        return self._follower is not None and self._follower.searching
+
+    def _start_face(self) -> None:
+        """Follow with the head and turn the body until the head is straight, from any head yaw."""
+        self._stop_face()
+        self._start_follow()
+        self._turner = BodyTurner(float(self._state.policy().vel_max_ang))
+        self._turner.engage()
+        self._facing = True
+
+    def _stop_face(self) -> None:
+        """Stop turning and end any approach. The follow, if any, goes on."""
+        self._approach = None
+        self._speed = 0.0
+        self._facing = False
+        self._turner = None
+        self._turn = 0.0
+        self._hunt = None
+
+    def _turn_tick(self, bearing: float) -> None:
+        """Turn rate once per picture: toward the ball while it is in view, the hunt while it is not."""
+        if not self._facing:
+            return
+
+        if self._at_ball():
+            self._turn = 0.0
+            return
+
+        if self._follower.searching:
+            # Clears the turner latch. The hunt drives the body while the ball is out of view.
+            self._turner.update(bearing, searching=True)
+            self._turn = self._hunt_tick(bearing)
+            return
+
+        if self._hunt is not None:
+            self._hunt = None
+            self._turner.engage()
+
+        self._turn = self._turner.update(bearing, searching=False)
+
+    def _hunt_tick(self, bearing: float) -> float:
+        """Turn the body the way the ball last was. A full turn gives up."""
+        if self._hunt is None:
+            self._hunt = BallHunt(direction=bearing)
+
+        turn = self._hunt.update(self._body_yaw())
+        if self._hunt.gave_up:
+            self._give_up()
+
+        return turn
+
+    def _give_up(self) -> None:
+        """No ball after a full turn. The face and the follow end, the head goes home."""
+        self._stop_follow()
+        self._head = [0.0, 0.0, 0.0, 0.0]
+        self._lost = True
+
+    def _body_yaw(self) -> float:
+        return _yaw(self._env.scene["robot"].data.root_link_quat_w[0])
+
+    def _turning(self) -> bool:
+        if self._at_ball():
+            return False
+
+        return self._facing and (self._turner.turning or self._hunt is not None)
+
+    def _start_go_to_ball(self) -> None:
+        """Face the ball and walk up to it. The approach ends itself at arrived or gave up."""
+        self._start_face()
+        self._approach = BallApproach(PICTURE_EVERY * self._dt)
+
+    def _approach_tick(self, sighting: BallSighting | None, pitch: float) -> None:
+        """Forward speed from the approach rule, once per picture. Zeroes the turn at arrival."""
+        if self._approach is None:
+            return
+
+        self._speed = self._approach.update(sighting, pitch, self._follower.searching, self._turning())
+
+        if self._at_ball():
+            self._turn = 0.0
+
+    def _approach_status(self) -> str:
+        """The approach state for /status, or "none" when no approach runs."""
+        if self._approach is None:
+            return "none"
+
+        return self._approach.state
+
+    def _at_ball(self) -> bool:
+        """True once the approach has arrived. The body then holds still whatever the head sees."""
+        return self._approach is not None and self._approach.state == "arrived"
 
     # Tensors.
 
@@ -286,6 +528,9 @@ class ViewerCommander:
 
         if self._posture == "rising":
             return [0.0, 0.0, 0.0]
+
+        if self._facing:
+            return [self._speed, 0.0, self._turn]
 
         return self._twist
 
@@ -344,5 +589,17 @@ class ViewerCommander:
             "posture": self._posture,
             "trick": self._trick_status(),
             "fallen": self._is_fallen(),
+            "following": self._following,
+            "ball_seen": self._sighting() is not None,
+            "ball": self._ball_status(),
+            "ball_side": ball_side(self._head[HEAD_YAW], self._sighting()),
+            "ball_close": ball_close(self._sighting(), self._head[HEAD_PITCH]),
+            "last_kick_travel": self._last_kick_travel,
+            "searching": self._searching(),
+            "facing": self._facing,
+            "turning": self._turning(),
+            "lost": self._lost,
+            "approach": self._approach_status(),
+            "at_ball": self._at_ball(),
             "actions": dict(self._actions),
         })

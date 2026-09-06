@@ -17,6 +17,9 @@ Routes:
     POST /kick      {"foot": "right" | "left"}, kick with that foot, right by default
     POST /ball      {"foot": "right" | "left"}, new ball in front of that foot
     POST /ground_pick   beak to the floor and back up, no body
+    POST /follow_ball   keep the ball in view with the head, no body
+    POST /face_ball     turn on the spot until the ball is ahead, no body
+    POST /go_to_ball    walk to the ball and stop in front of it, no body
     POST /stop      zero twist, head and gesture
     POST /reset     stop, and respawn the robot where the sim supports it
 """
@@ -79,6 +82,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         "/kick": "_kick",
         "/ball": "_ball",
         "/ground_pick": "_ground_pick",
+        "/follow_ball": "_follow_ball",
+        "/face_ball": "_face_ball",
+        "/go_to_ball": "_go_to_ball",
         "/reset": "_reset",
     }
 
@@ -204,6 +210,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # One ground pick cycle. Nothing is grabbed, the sim has no mouth.
     def _ground_pick(self, _body: dict) -> dict:
         return self._state.submit_ground_pick()
+
+    # Keep the ball in view with the head until a stop, a sit, a look or a trick.
+    def _follow_ball(self, _body: dict) -> dict:
+        return self._state.submit_follow_ball()
+
+    # Turn on the spot until the ball is straight ahead. The head keeps following.
+    def _face_ball(self, _body: dict) -> dict:
+        return self._state.submit_face_ball()
+
+    # Walk to the ball and stop one foot length in front of it.
+    def _go_to_ball(self, _body: dict) -> dict:
+        return self._state.submit_go_to_ball()
 
     # Zero everything now.
     def _stop(self, _body: dict) -> dict:

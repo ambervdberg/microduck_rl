@@ -73,14 +73,31 @@ SIT_SETTLE_S = 2.5
 # How long a look takes to settle, so two looks in a row are both visible.
 LOOK_SETTLE_S = 1.0
 
-# How long each trick runs, matching the bridge timers.
+# How long each trick runs. A bridge kick adds a 0.4 s lead to bring the head
+# home first, the margin below covers it.
 ROLL_SECONDS = 2.0
 GET_UP_SECONDS = 3.0
 KICK_SECONDS = 1.5
 GROUND_PICK_SECONDS = 4.0
 
+# How far the ball must travel for a kick to count as landed, in metres.
+KICK_TRAVEL_M = 0.3
+
+# How long a kick looks for the ball: the head camera needs a few pictures to find it.
+LOOK_FOR_BALL_S = 3.0
+
 # Extra wait on top of the trick seconds. Sim time in the viewer runs slower than wall time.
 TRICK_WAIT_MARGIN_S = 4.0
+
+# Wait cap for a face: a full hunt circle at HUNT_RATE plus the turn, in slow viewer time.
+FACE_MAX_WAIT_S = 25.0
+
+# Wait cap for a walk to the ball. The bridge gives up at 20 s of sim time,
+# which is about 33 s of wall time in the slower viewer.
+GO_TO_BALL_MAX_WAIT_S = 40.0
+
+# Approach values that mean the walk to the ball is over.
+APPROACH_OVER = ("arrived", "gave_up", "none")
 
 # What /status reports while no trick is running.
 NO_TRICK = "none"
@@ -134,7 +151,7 @@ def _wait_until_idle(max_wait_s: float) -> None:
             return
 
 
-def _wait_for_status(field: str, target: str, max_wait_s: float) -> None:
+def _wait_for_status(field: str, target: str | bool, max_wait_s: float) -> None:
     """Block until a status field reaches its target, or the wait cap passes.
 
     The start window comes first: a stale snapshot from before the sim drained
@@ -174,7 +191,7 @@ def _post_and_wait(path: str, body: dict, max_wait) -> str:
     return reply
 
 
-def _post_and_watch(path: str, field: str, target: str, max_wait_s: float, settle_s: float = 0.0,
+def _post_and_watch(path: str, field: str, target: str | bool, max_wait_s: float, settle_s: float = 0.0,
                     body: dict | None = None) -> str:
     """POST a command, then wait for a status field to reach its target. Errors return at once.
 
@@ -189,6 +206,43 @@ def _post_and_watch(path: str, field: str, target: str, max_wait_s: float, settl
         time.sleep(settle_s)
 
     return reply
+
+
+def _post_and_wait_for(path: str, field: str, targets: tuple, max_wait_s: float) -> str:
+    """POST a command, wait for a status field to reach one of the targets, return that field.
+
+    A bridge error returns at once. A wait that runs out returns the last value seen.
+    The reply also carries lost and at_ball from the last status read.
+    A "none" before the walk has started is the old status and is skipped.
+    """
+    reply = _post(path, {})
+    echo = json.loads(reply)
+
+    if "error" in echo:
+        return reply
+
+    time.sleep(START_WAIT_S)
+    deadline = time.monotonic() + max_wait_s
+    value = None
+    status = {}
+    started = False
+
+    while time.monotonic() < deadline:
+        status = _poll_status()
+
+        if "error" in status:
+            return json.dumps(status)
+
+        value = status.get(field)
+
+        if value != "none":
+            started = True
+
+        if value in targets and (value != "none" or started):
+            break
+
+    return json.dumps({field: value, "lost": bool(status.get("lost", False)),
+                        "at_ball": bool(status.get("at_ball", False))})
 
 
 def _post_posture(path: str, target: str, settle_s: float = 0.0) -> str:
@@ -282,14 +336,103 @@ def get_up() -> str:
 
 
 @tool
-def kick(foot: str = "right") -> str:
-    """Kick the ball with one foot, 'right' or 'left'. Returns once the kick is over.
+def kick(foot: str = "auto") -> str:
+    """Kick the ball, looking for it and walking up to it first when it is not already at a foot.
 
-    The robot must be standing and free. Nothing checks for a ball: with no
-    ball at that foot the kick swings at air, like the real robot. Do not call
-    new_ball before a kick on your own, the user asks for a ball.
+    foot: 'auto' lets the robot kick with the foot the ball is on, 'left' or
+    'right' pick one. The robot must be standing and free. The reply says foot,
+    kicked true only when the ball moved and null when the robot cannot tell,
+    travel in metres, walked_up true when
+    the robot walked to the ball first, and looked true when it turned the head
+    camera on to find the ball. When the walk to the ball did not arrive, the
+    reply is that walk instead, with approach gave_up, lost or walking and no
+    kick. Do not call new_ball before a kick on your own, the user asks for a ball.
     """
-    return _post_trick("/kick", KICK_SECONDS, {"foot": foot})
+    status, error = _status_or_error()
+    if error:
+        return error
+    looked = False
+
+    if not status.get("ball_seen"):
+        looked = _look_for_ball()
+        status, error = _status_or_error()
+        if error:
+            return error
+
+    walked_up = False
+
+    if _ball_far(status):
+        approach = _walk_up()
+
+        # Anything but arrived means the robot is not at the ball, so no swing.
+        if approach.get("approach") != "arrived":
+            return json.dumps(approach)
+
+        walked_up = True
+
+    reply = _post_trick("/kick", KICK_SECONDS, {"foot": foot})
+    echo = json.loads(reply)
+    if "error" in echo:
+        return reply
+
+    status, error = _status_or_error()
+    if error:
+        return error
+
+    return _kick_reply(echo, status, walked_up, looked)
+
+
+def _status_or_error() -> tuple[dict, str | None]:
+    """Read /status. On a bridge error, return the reply to return early instead."""
+    status = json.loads(_get("/status"))
+    if "error" in status:
+        return status, json.dumps(status)
+    return status, None
+
+
+def _look_for_ball() -> bool:
+    """Turn the head camera on and wait for the ball to show up. True when the follow started.
+
+    The bridge only knows where the ball is while a follow runs, so a kick out
+    of the blue has to start one.
+    """
+    if "error" in json.loads(_post("/follow_ball", {})):
+        return False
+
+    deadline = time.monotonic() + LOOK_FOR_BALL_S
+
+    while time.monotonic() < deadline:
+        if _poll_status().get("ball_seen"):
+            return True
+
+    # No ball found: end the follow, or the head sweeps on until the user speaks.
+    _post("/stop", {})
+
+    return True
+
+
+def _ball_far(status: dict) -> bool:
+    """True when the ball is in view but out of kick reach."""
+    return bool(status.get("ball_seen")) and not status.get("ball_close")
+
+
+def _walk_up() -> dict:
+    """Walk to the ball, the same wait go_to_ball makes, parsed."""
+    return json.loads(_post_and_wait_for("/go_to_ball", "approach", APPROACH_OVER, GO_TO_BALL_MAX_WAIT_S))
+
+
+def _kick_reply(echo: dict, status: dict, walked_up: bool, looked: bool) -> str:
+    """Build the kick reply from the trick the bridge ran and the status after it.
+
+    No travel field means the robot cannot tell whether the ball moved: both
+    kicked and travel come back null.
+    """
+    raw = status.get("last_kick_travel")
+    travel = None if raw is None else float(raw)
+    kicked = None if travel is None else travel > KICK_TRAVEL_M
+    foot = str(echo.get("trick") or "").removeprefix("kick_")
+
+    return json.dumps({"foot": foot, "kicked": kicked, "travel": travel, "walked_up": walked_up, "looked": looked})
 
 
 @tool
@@ -312,9 +455,60 @@ def ground_pick() -> str:
 
 
 @tool
+def follow_ball() -> str:
+    """Turn the head to keep the ball in view. Returns at once, the follow keeps running.
+
+    It stays on until stop, sit, look, a gesture or a trick. When the ball is out
+    of view the head sweeps left and right until it shows up again. Walking is
+    allowed while following. Read status for ball_seen to answer "do you see it".
+    """
+    return _post("/follow_ball", {})
+
+
+@tool
+def face_ball() -> str:
+    """Turn on the spot until the ball is straight ahead. Returns once the body stops turning.
+
+    Starts follow_ball too, so the head keeps the ball in view afterwards. The
+    robot must be standing and free. While the ball is out of view the body
+    turns a full circle to look for it. If the reply has lost true, the ball
+    was not found anywhere and the robot stopped, tell the user so.
+    """
+    return _with_face_outcome(_post_and_watch("/face_ball", "turning", False, FACE_MAX_WAIT_S))
+
+
+def _with_face_outcome(reply: str) -> str:
+    """Add the bridge's lost and turning flags to a face reply. Errors pass through."""
+    echo = json.loads(reply)
+    if "error" in echo:
+        return reply
+
+    status = json.loads(_get("/status"))
+    echo["lost"] = bool(status.get("lost", False))
+    echo["turning"] = bool(status.get("turning", False))
+
+    return json.dumps(echo)
+
+
+@tool
+def go_to_ball() -> str:
+    """Walk to the ball and stop one foot length in front of it. Returns when it is there or gave up.
+
+    Faces the ball first, walks at the slow speed, keeps the head on the ball.
+    The reply says approach: arrived, gave_up (20 s without getting there) or
+    walking (still going when the wait ran out). The reply also says lost true
+    when the ball was never found, and at_ball true when a kick can reach it.
+    """
+    return _post_and_wait_for("/go_to_ball", "approach", APPROACH_OVER, GO_TO_BALL_MAX_WAIT_S)
+
+
+@tool
 def status() -> str:
     """Current robot state: active policy, speeds, head pose, fallen or not."""
     return _get("/status")
 
 
-ALL_TOOLS = [walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, status]
+ALL_TOOLS = [
+    walk, stop, look, gesture, sit, stand_up, roll, get_up, kick, new_ball, ground_pick, follow_ball, face_ball,
+    go_to_ball, status,
+]

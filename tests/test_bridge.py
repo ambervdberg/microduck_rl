@@ -17,11 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from gestures import default_gestures  # noqa: E402
 
 from bridge.state import (  # noqa: E402
+    AUTO_FOOT,
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
     GROUND_PICK_SECONDS,
     HEAD_PITCH_MAX,
     HEAD_YAW_MAX,
+    KICK_LEAD_S,
     KICK_SECONDS,
     RISE_SECONDS,
     ROLL_SECONDS,
@@ -30,7 +32,10 @@ from bridge.state import (  # noqa: E402
     WALK_MAX_S,
     BallCmd,
     BridgeState,
+    FaceBallCmd,
+    FollowBallCmd,
     GestureCmd,
+    GoToBallCmd,
     LookCmd,
     PostureCmd,
     ResetCmd,
@@ -88,6 +93,7 @@ class FakePolicy:
         kick_right: bool = False,
         kick_left: bool = False,
         ground_pick: bool = False,
+        camera: bool = False,
     ):
         self.vel_cmd = np.zeros(3, dtype=np.float32)
         self.head_offset = np.zeros(4, dtype=np.float32)
@@ -104,6 +110,7 @@ class FakePolicy:
         self.kick_right_session = object() if kick_right else None
         self.kick_left_session = object() if kick_left else None
         self.ground_pick_session = object() if ground_pick else None
+        self.camera = camera
         self.ground_picks = 0
         self.balls = []
         self.behaviors = []
@@ -502,6 +509,42 @@ class TestKickState:
         assert TRICKS["kick_left"].seconds == KICK_SECONDS
         assert TRICKS["kick_right"].status == "kicking"
 
+    def test_only_a_kick_leads_with_the_walking_policy(self):
+        assert TRICKS["kick_right"].lead_s == KICK_LEAD_S
+        assert TRICKS["kick_left"].lead_s == KICK_LEAD_S
+        assert TRICKS["roll"].lead_s == 0.0
+        assert TRICKS["get_up"].lead_s == 0.0
+        assert TRICKS["ground_pick"].lead_s == 0.0
+
+    def test_auto_foot_kicks_the_side_the_ball_is_on(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        state.set_status({"ball_side": "left"})
+        assert state.submit_kick(AUTO_FOOT) == {"trick": "kick_left"}
+        assert state.drain() == [TrickCmd("kick_left")]
+
+        state.set_status({"ball_side": "right"})
+        assert state.submit_kick(AUTO_FOOT) == {"trick": "kick_right"}
+        assert state.drain() == [TrickCmd("kick_right")]
+
+    def test_auto_foot_with_no_ball_side_key_falls_back_to_the_right_foot(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        assert state.submit_kick(AUTO_FOOT) == {"trick": "kick_right"}
+        assert state.drain() == [TrickCmd("kick_right")]
+
+    def test_auto_foot_with_ball_side_none_is_rejected(self):
+        state, _ = _pair(kick_right=True, kick_left=True)
+        state.set_status({"ball_side": None})
+        with pytest.raises(ValueError, match="no ball in view, say which foot to kick with"):
+            state.submit_kick(AUTO_FOOT)
+        assert state.drain() == []
+
+    def test_auto_foot_without_that_foots_policy_is_rejected(self):
+        state, _ = _pair(kick_right=True)
+        state.set_status({"ball_side": "left"})
+        with pytest.raises(ValueError, match="no kick_left policy loaded, start the runner with --kick-left"):
+            state.submit_kick(AUTO_FOOT)
+        assert state.drain() == []
+
 
 class TestBallState:
     def test_ball_is_queued_for_either_foot(self):
@@ -572,6 +615,119 @@ class TestGroundPickState:
         assert TRICKS["ground_pick"].status == "picking"
 
 
+class TestFollowBallState:
+    def test_follow_ball_is_queued(self):
+        state, _ = _pair(camera=True)
+        assert state.submit_follow_ball() == {"following": True}
+        assert state.drain() == [FollowBallCmd()]
+
+    def test_follow_ball_without_a_camera_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError, match="no head camera, start the viewer with --follow-ball"):
+            state.submit_follow_ball()
+        assert state.drain() == []
+
+    def test_follow_ball_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, camera=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_while_rising_is_rejected(self):
+        state, _ = _pair(sit=True, camera=True)
+        state.set_status({"sitting": False, "posture": "rising"})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"trick": "kicking"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_while_fallen_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"fallen": True})
+        with pytest.raises(ValueError, match="fallen, get up first"):
+            state.submit_follow_ball()
+
+    def test_follow_ball_counts_as_a_brain_request(self):
+        state, _ = _pair(camera=True)
+        before = state.request_count()
+        state.submit_follow_ball()
+        assert state.request_count() == before + 1
+
+
+class TestFaceBallState:
+    def test_face_ball_is_queued(self):
+        state, _ = _pair(camera=True)
+        assert state.submit_face_ball() == {"facing": True}
+        assert state.drain() == [FaceBallCmd()]
+
+    def test_face_ball_without_a_camera_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError, match="no head camera"):
+            state.submit_face_ball()
+
+    def test_face_ball_without_a_walking_policy_is_rejected(self):
+        state, _ = _pair(walking=False, camera=True)
+        with pytest.raises(ValueError, match="no walking policy"):
+            state.submit_face_ball()
+
+    def test_face_ball_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, camera=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_face_ball()
+
+    def test_face_ball_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"trick": "rolling"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_face_ball()
+
+    def test_face_ball_while_fallen_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"fallen": True})
+        with pytest.raises(ValueError, match="fallen, get up first"):
+            state.submit_face_ball()
+
+
+class TestGoToBallState:
+    def test_go_to_ball_is_queued(self):
+        state, _ = _pair(camera=True)
+        assert state.submit_go_to_ball() == {"going": True}
+        assert state.drain() == [GoToBallCmd()]
+
+    def test_go_to_ball_without_a_camera_is_rejected(self):
+        state, _ = _pair()
+        with pytest.raises(ValueError, match="no head camera"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_without_a_walking_policy_is_rejected(self):
+        state, _ = _pair(walking=False, camera=True)
+        with pytest.raises(ValueError, match="no walking policy"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_while_seated_is_rejected(self):
+        state, _ = _pair(sit=True, camera=True)
+        state.set_status({"sitting": True})
+        with pytest.raises(ValueError, match="sitting, stand up first"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_while_a_trick_runs_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"trick": "kicking"})
+        with pytest.raises(ValueError, match="trick is running"):
+            state.submit_go_to_ball()
+
+    def test_go_to_ball_while_fallen_is_rejected(self):
+        state, _ = _pair(camera=True)
+        state.set_status({"fallen": True})
+        with pytest.raises(ValueError, match="fallen, get up first"):
+            state.submit_go_to_ball()
+
+
 class TestAvailableActions:
     def test_walking_policy_offers_walk_look_and_both_gestures(self):
         actions = available_actions(FakePolicy())
@@ -609,6 +765,18 @@ class TestAvailableActions:
         actions = available_actions(policy)
         assert actions["sit"] is True
         assert actions["stand up"] is True
+
+    def test_follow_ball_follows_the_camera(self):
+        assert available_actions(FakePolicy())["follow ball"] is False
+        assert available_actions(FakePolicy(camera=True))["follow ball"] is True
+
+    def test_face_ball_follows_the_camera(self):
+        assert available_actions(FakePolicy())["face ball"] is False
+        assert available_actions(FakePolicy(camera=True))["face ball"] is True
+
+    def test_go_to_ball_follows_the_camera(self):
+        assert available_actions(FakePolicy())["go to ball"] is False
+        assert available_actions(FakePolicy(camera=True))["go to ball"] is True
 
 
 class TestBrainWatchdog:
@@ -1216,6 +1384,12 @@ class TestBridgeServer:
             assert _post(f"{url}/kick", {"foot": "left"}) == (200, {"trick": "kick_left"})
             assert state.drain() == [TrickCmd("kick_left")]
 
+    def test_kick_roundtrip_with_auto_foot_uses_the_balls_side(self):
+        with _served(FakePolicy(kick_right=True, kick_left=True)) as (state, url):
+            state.set_status({"ball_side": "left"})
+            assert _post(f"{url}/kick", {"foot": "auto"}) == (200, {"trick": "kick_left"})
+            assert state.drain() == [TrickCmd("kick_left")]
+
     def test_ball_roundtrip(self):
         with _served(FakePolicy(kick_right=True, kick_left=True)) as (state, url):
             assert _post(f"{url}/ball", {}) == (200, {"ball": "right"})
@@ -1255,3 +1429,38 @@ class TestBridgeServer:
             _post(f"{url}/ground_pick", {})
         assert excinfo.value.code == 400
         assert state.drain() == []
+
+    def test_follow_ball_roundtrip(self):
+        with _served(FakePolicy(camera=True)) as (state, url):
+            assert _post(f"{url}/follow_ball", {}) == (200, {"following": True})
+            assert state.drain() == [FollowBallCmd()]
+
+    def test_follow_ball_without_a_camera_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/follow_ball", {})
+        assert excinfo.value.code == 400
+        assert state.drain() == []
+
+    def test_face_ball_roundtrip(self):
+        with _served(FakePolicy(camera=True)) as (state, url):
+            assert _post(f"{url}/face_ball", {}) == (200, {"facing": True})
+            assert state.drain() == [FaceBallCmd()]
+
+    def test_face_ball_without_a_camera_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/face_ball", {})
+        assert excinfo.value.code == 400
+        assert state.drain() == []
+
+    def test_go_to_ball_roundtrip(self):
+        with _served(FakePolicy(camera=True)) as (state, url):
+            assert _post(f"{url}/go_to_ball", {}) == (200, {"going": True})
+            assert state.drain() == [GoToBallCmd()]
+
+    def test_go_to_ball_without_a_camera_returns_400(self, served_state):
+        state, url = served_state
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _post(f"{url}/go_to_ball", {})
+        assert excinfo.value.code == 400

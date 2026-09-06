@@ -1,0 +1,371 @@
+"""The follower turns ball sightings into the next head pose, and sweeps when the ball is lost."""
+import math
+import os
+import sys
+
+import pytest
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+
+from bridge.ball_finder import BallSighting
+from bridge.follower import (
+    APPROACH_SPEED,
+    ARRIVE_PITCH,
+    ARRIVE_SIZE,
+    CLOSE_PITCH_MARGIN,
+    DEAD_BAND,
+    FACE_GAIN,
+    FACE_START,
+    FACE_STOP,
+    FACE_TURN_MIN,
+    GAIN,
+    GIVE_UP_S,
+    HUNT_RATE,
+    LOST_AFTER_S,
+    SEARCH_PITCH,
+    SEARCH_RATE,
+    SEARCH_YAW_MAX,
+    TAN_HALF_WIDTH,
+    BallApproach,
+    BallFollower,
+    BallHunt,
+    BodyTurner,
+    ball_bearing,
+    ball_close,
+    ball_side,
+)
+from bridge.state import HEAD_PITCH_MAX, HEAD_YAW_MAX
+
+DT = 0.1
+LOST_UPDATES = int(round(LOST_AFTER_S / DT))
+
+
+def _seen(x=0.0, y=0.0, size=40):
+    return BallSighting(x, y, size)
+
+
+def _unseen_for(follower, updates, pitch=0.0, yaw=0.0):
+    for _ in range(updates):
+        pitch, yaw = follower.update(None, pitch, yaw)
+    return pitch, yaw
+
+
+def test_a_ball_on_the_right_turns_the_head_right():
+    pitch, yaw = BallFollower(DT).update(_seen(x=0.5), 0.0, 0.0)
+    assert yaw == pytest.approx(-GAIN * 0.5)
+    assert pitch == 0.0
+
+
+def test_a_ball_on_the_left_turns_the_head_left():
+    _pitch, yaw = BallFollower(DT).update(_seen(x=-0.5), 0.0, 0.0)
+    assert yaw == pytest.approx(GAIN * 0.5)
+
+
+def test_a_ball_low_in_the_picture_tilts_the_head_down():
+    pitch, yaw = BallFollower(DT).update(_seen(y=0.5), 0.0, 0.0)
+    assert pitch == pytest.approx(GAIN * 0.5)
+    assert yaw == 0.0
+
+
+def test_a_centred_ball_holds_the_head():
+    pitch, yaw = BallFollower(DT).update(_seen(x=DEAD_BAND / 2, y=-DEAD_BAND / 2), 0.2, -0.3)
+    assert (pitch, yaw) == (0.2, -0.3)
+
+
+def test_the_head_never_passes_the_trained_caps():
+    follower = BallFollower(DT)
+    pitch, yaw = 0.0, 0.0
+    for _ in range(100):
+        pitch, yaw = follower.update(_seen(x=-1.0, y=1.0), pitch, yaw)
+    assert yaw == HEAD_YAW_MAX
+    assert pitch == HEAD_PITCH_MAX
+
+
+def test_tighter_caps_are_respected():
+    follower = BallFollower(DT, pitch_max=0.2, yaw_max=0.3)
+    pitch, yaw = 0.0, 0.0
+    for _ in range(20):
+        pitch, yaw = follower.update(_seen(x=1.0, y=1.0), pitch, yaw)
+    assert yaw == -0.3
+    assert pitch == 0.2
+
+
+def test_a_short_loss_keeps_the_pose():
+    follower = BallFollower(DT)
+    pitch, yaw = _unseen_for(follower, LOST_UPDATES - 1, pitch=0.2, yaw=0.4)
+    assert (pitch, yaw) == (0.2, 0.4)
+    assert follower.searching is False
+
+
+def test_a_full_second_without_a_ball_starts_the_search():
+    follower = BallFollower(DT)
+    pitch, yaw = _unseen_for(follower, LOST_UPDATES, pitch=0.2, yaw=0.4)
+    assert follower.searching is True
+    assert pitch == SEARCH_PITCH
+    assert yaw == pytest.approx(0.4 + SEARCH_RATE * DT)
+
+
+def test_the_sweep_turns_around_at_its_limit():
+    follower = BallFollower(DT)
+    _unseen_for(follower, LOST_UPDATES - 1)
+    pitch, yaw = follower.update(None, 0.0, SEARCH_YAW_MAX - 0.05)
+    assert yaw == SEARCH_YAW_MAX
+    pitch, yaw = follower.update(None, pitch, yaw)
+    assert yaw == pytest.approx(SEARCH_YAW_MAX - SEARCH_RATE * DT)
+
+
+def test_the_sweep_covers_both_sides():
+    follower = BallFollower(DT)
+    _unseen_for(follower, LOST_UPDATES)
+    yaws = []
+    pitch, yaw = 0.0, 0.0
+    for _ in range(int(4 * SEARCH_YAW_MAX / (SEARCH_RATE * DT))):
+        pitch, yaw = follower.update(None, pitch, yaw)
+        yaws.append(yaw)
+    assert min(yaws) == pytest.approx(-SEARCH_YAW_MAX, abs=1e-6)
+    assert max(yaws) == pytest.approx(SEARCH_YAW_MAX, abs=1e-6)
+
+
+def test_a_sighting_ends_the_search():
+    follower = BallFollower(DT)
+    pitch, yaw = _unseen_for(follower, LOST_UPDATES + 3)
+    assert follower.searching is True
+    pitch, yaw = follower.update(_seen(x=0.5), pitch, yaw)
+    assert follower.searching is False
+    assert follower.sighting == _seen(x=0.5)
+
+
+def test_the_last_sighting_is_kept_and_cleared():
+    follower = BallFollower(DT)
+    follower.update(_seen(x=0.1), 0.0, 0.0)
+    assert follower.sighting == _seen(x=0.1)
+    follower.update(None, 0.0, 0.0)
+    assert follower.sighting is None
+
+
+TURN_MAX = 1.0
+
+
+def test_a_small_head_yaw_asks_for_no_turn():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(FACE_STOP / 2, searching=False) == 0.0
+    assert turner.turning is False
+
+
+def test_a_head_far_to_the_left_turns_the_body_left():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(0.5, searching=False) == pytest.approx(FACE_GAIN * 0.5)
+    assert turner.turning is True
+
+
+def test_a_head_far_to_the_right_turns_the_body_right():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(-0.5, searching=False) == pytest.approx(-FACE_GAIN * 0.5)
+
+
+def test_the_turn_stays_under_the_cap():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(1.4, searching=False) == TURN_MAX
+    assert turner.update(-1.4, searching=False) == -TURN_MAX
+
+
+def test_the_turn_keeps_going_between_start_and_stop():
+    turner = BodyTurner(TURN_MAX)
+    turner.update(FACE_START + 0.05, searching=False)
+    assert turner.update(0.2, searching=False) == pytest.approx(FACE_TURN_MIN)
+    assert turner.turning is True
+
+
+def test_the_turn_ends_under_the_stop_yaw():
+    turner = BodyTurner(TURN_MAX)
+    turner.update(0.5, searching=False)
+    assert turner.update(FACE_STOP - 0.01, searching=False) == 0.0
+    assert turner.turning is False
+
+
+def test_a_turn_does_not_start_between_stop_and_start():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(0.2, searching=False) == 0.0
+    assert turner.turning is False
+
+
+def test_searching_holds_the_body_still():
+    turner = BodyTurner(TURN_MAX)
+    turner.update(0.5, searching=False)
+    assert turner.update(1.0, searching=True) == 0.0
+    assert turner.turning is False
+
+
+def test_the_hunt_turns_the_way_the_head_looked():
+    assert BallHunt(direction=-0.4).update(0.0) == -HUNT_RATE
+    assert BallHunt(direction=0.4).update(0.0) == HUNT_RATE
+
+
+def test_the_hunt_turns_left_when_the_head_was_straight():
+    assert BallHunt(direction=0.0).update(0.0) == HUNT_RATE
+
+
+def test_the_hunt_keeps_going_before_a_full_turn():
+    hunt = BallHunt(direction=1.0)
+    for yaw in (0.0, 1.5, 3.0):
+        assert hunt.update(yaw) == HUNT_RATE
+    assert hunt.gave_up is False
+
+
+def test_the_hunt_gives_up_after_a_full_turn():
+    hunt = BallHunt(direction=1.0)
+    for step in range(8):
+        hunt.update(step * 1.0)
+    assert hunt.gave_up is True
+    assert hunt.update(8.0) == 0.0
+
+
+def test_the_turn_count_crosses_the_pi_seam():
+    hunt = BallHunt(direction=1.0)
+    hunt.update(3.0)
+    hunt.update(-3.0)
+    assert hunt.turned == pytest.approx(2 * math.pi - 6.0)
+
+
+def test_turning_the_wrong_way_counts_down():
+    hunt = BallHunt(direction=1.0)
+    hunt.update(0.0)
+    hunt.update(-1.0)
+    assert hunt.turned == pytest.approx(-1.0)
+    assert hunt.gave_up is False
+
+
+def test_engage_turns_from_between_stop_and_start():
+    turner = BodyTurner(TURN_MAX)
+    turner.engage()
+    assert turner.update(0.2, searching=False) == pytest.approx(FACE_TURN_MIN)
+    assert turner.turning is True
+
+
+def test_engage_ends_at_once_under_the_stop_yaw():
+    turner = BodyTurner(TURN_MAX)
+    turner.engage()
+    assert turner.update(FACE_STOP / 2, searching=False) == 0.0
+    assert turner.turning is False
+
+
+def test_the_bearing_is_the_head_yaw_when_nothing_is_seen():
+    assert ball_bearing(0.4, None) == 0.4
+
+
+def test_a_ball_in_the_middle_bears_where_the_head_looks():
+    assert ball_bearing(-0.3, BallSighting(0.0, 0.5, 10)) == -0.3
+
+
+def test_a_ball_at_the_right_edge_bears_a_half_width_to_the_right():
+    assert ball_bearing(0.0, BallSighting(1.0, 0.0, 10)) == pytest.approx(-math.atan(TAN_HALF_WIDTH))
+
+
+def test_the_half_width_matches_the_head_camera():
+    assert math.degrees(math.atan(TAN_HALF_WIDTH)) == pytest.approx(45.65, abs=0.05)
+
+
+def test_a_small_bearing_still_gets_the_minimum_turn():
+    turner = BodyTurner(TURN_MAX)
+    turner.engage()
+    assert turner.update(-0.15, searching=False) == pytest.approx(-FACE_TURN_MIN)
+
+
+def test_a_large_bearing_is_above_the_minimum():
+    turner = BodyTurner(TURN_MAX)
+    assert turner.update(0.5, searching=False) == pytest.approx(FACE_GAIN * 0.5)
+
+
+def test_the_minimum_turn_is_inside_the_cap():
+    turner = BodyTurner(0.2)
+    turner.engage()
+    assert turner.update(0.2, searching=False) == 0.2
+
+
+GIVE_UP_UPDATES = int(round(GIVE_UP_S / DT))
+
+
+def _approach():
+    return BallApproach(DT)
+
+
+def test_a_seen_ball_ahead_means_walk():
+    approach = _approach()
+    assert approach.update(_seen(), 0.2, searching=False, turning=False) == APPROACH_SPEED
+    assert approach.state == "walking"
+
+
+def test_turning_holds_the_walk():
+    approach = _approach()
+    assert approach.update(_seen(), 0.2, searching=False, turning=True) == 0.0
+    assert approach.state == "turning"
+
+
+def test_searching_holds_the_walk():
+    approach = _approach()
+    assert approach.update(None, 0.2, searching=True, turning=False) == 0.0
+    assert approach.state == "lost"
+
+
+def test_a_short_loss_holds_the_walk_too():
+    approach = _approach()
+    assert approach.update(None, 0.2, searching=False, turning=False) == 0.0
+    assert approach.state == "lost"
+
+
+def test_the_stop_pitch_means_arrived_and_stays_arrived():
+    approach = _approach()
+    assert approach.update(_seen(), ARRIVE_PITCH, searching=False, turning=False) == 0.0
+    assert approach.state == "arrived"
+    assert approach.update(_seen(), 0.1, searching=False, turning=False) == 0.0
+    assert approach.state == "arrived"
+
+
+def test_a_big_ball_means_arrived_before_the_pitch_cap():
+    approach = _approach()
+    assert approach.update(_seen(size=ARRIVE_SIZE), 0.2, searching=False, turning=False) == 0.0
+    assert approach.state == "arrived"
+
+
+def test_give_up_after_the_timeout():
+    approach = _approach()
+    for _ in range(GIVE_UP_UPDATES - 1):
+        approach.update(_seen(), 0.2, searching=False, turning=False)
+    assert approach.state == "walking"
+    assert approach.update(_seen(), 0.2, searching=False, turning=False) == 0.0
+    assert approach.state == "gave_up"
+    assert approach.update(_seen(), ARRIVE_PITCH, searching=False, turning=False) == 0.0
+    assert approach.state == "gave_up"
+
+
+def test_a_ball_out_of_view_has_no_side():
+    assert ball_side(0.4, None) is None
+
+
+def test_head_yaw_left_puts_the_ball_on_the_left():
+    assert ball_side(0.1, _seen()) == "left"
+
+
+def test_head_yaw_zero_puts_the_ball_on_the_right():
+    assert ball_side(0.0, _seen()) == "right"
+
+
+def test_head_yaw_right_puts_the_ball_on_the_right():
+    assert ball_side(-0.1, _seen()) == "right"
+
+
+def test_a_ball_out_of_view_is_never_close():
+    assert ball_close(None, ARRIVE_PITCH) is False
+
+
+def test_a_ball_at_the_close_margin_is_close():
+    assert ball_close(_seen(), ARRIVE_PITCH - CLOSE_PITCH_MARGIN) is True
+
+
+def test_a_ball_just_short_of_the_close_margin_is_not_close():
+    assert ball_close(_seen(), ARRIVE_PITCH - CLOSE_PITCH_MARGIN - 0.01) is False
+
+
+def test_a_ball_at_the_arrival_pitch_is_close():
+    assert ball_close(_seen(), ARRIVE_PITCH) is True

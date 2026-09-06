@@ -31,8 +31,15 @@ GET_UP_SECONDS = 3.0
 KICK_SECONDS = 1.5
 GROUND_PICK_SECONDS = 4.0
 
+# Seconds of walking on a zero command before a kick swings.
+# The kick policy was trained with the head near rest, so the head has to come home first.
+KICK_LEAD_S = 0.4
+
 # The feet a kick or a new ball can name.
 FEET = ("right", "left")
+
+# Kick foot value that picks the side the ball is on.
+AUTO_FOOT = "auto"
 
 # What /status reports while no trick is running.
 NO_TRICK = "none"
@@ -89,6 +96,21 @@ class BallCmd:
 
 
 @dataclass(frozen=True)
+class FollowBallCmd:
+    """Turn the head to keep the ball in view. Runs until a stop, a sit, a look or a trick."""
+
+
+@dataclass(frozen=True)
+class FaceBallCmd:
+    """Follow the ball with the head and turn the body until it is straight ahead."""
+
+
+@dataclass(frozen=True)
+class GoToBallCmd:
+    """Walk to the ball and stop one foot length in front of it. Follows and faces it on the way."""
+
+
+@dataclass(frozen=True)
 class Trick:
     """One trick: the policy that runs it, how long it takes, what /status calls it."""
 
@@ -97,14 +119,15 @@ class Trick:
     seconds: float
     status: str
     flag: str
+    lead_s: float = 0.0  # seconds the walking policy holds a zero command first
 
 
 # Trick name the API speaks -> everything the bridge needs to run and report it.
 TRICKS = {
     "roll": Trick("roulade_session", "roulade", ROLL_SECONDS, "rolling", "--roulade"),
     "get_up": Trick("standup_session", "standup", GET_UP_SECONDS, "getting_up", "--standup"),
-    "kick_right": Trick("kick_right_session", "kick_right", KICK_SECONDS, "kicking", "--kick-right"),
-    "kick_left": Trick("kick_left_session", "kick_left", KICK_SECONDS, "kicking", "--kick-left"),
+    "kick_right": Trick("kick_right_session", "kick_right", KICK_SECONDS, "kicking", "--kick-right", KICK_LEAD_S),
+    "kick_left": Trick("kick_left_session", "kick_left", KICK_SECONDS, "kicking", "--kick-left", KICK_LEAD_S),
     "ground_pick": Trick("ground_pick_session", "ground_pick", GROUND_PICK_SECONDS, "picking", "--ground-pick"),
 }
 
@@ -135,6 +158,9 @@ ACTIONS = (
     ("kick left", "kick_left_session"),
     ("roulade", "roulade_session"),
     ("get up off the floor", "standup_session"),
+    ("follow ball", "camera"),
+    ("face ball", "camera"),
+    ("go to ball", "camera"),
 )
 
 
@@ -312,8 +338,27 @@ class BridgeState:
         return {"trick": name}
 
     def submit_kick(self, foot="right") -> dict:
-        """Queue a kick with one foot. The ball is not checked: with no ball the kick swings at air."""
-        return self.submit_trick(f"kick_{_checked_foot(foot)}")
+        """Queue a kick with one foot, or "auto" for the foot on the ball's side."""
+        return self.submit_trick(f"kick_{self._kick_foot(foot)}")
+
+    def _kick_foot(self, foot) -> str:
+        """Resolve "auto" to the ball's side. Any other value is a plain foot name."""
+        if foot != AUTO_FOOT:
+            return _checked_foot(foot)
+
+        status = self.peek_status()
+
+        # No key at all means a runner with no ball vision, default to the right foot.
+        # A key present but None means a camera that sees no ball, keep raising.
+        if "ball_side" not in status:
+            return "right"
+
+        ball_side = status.get("ball_side")
+
+        if ball_side is None:
+            raise ValueError("no ball in view, say which foot to kick with")
+
+        return ball_side
 
     def submit_ball(self, foot="right") -> dict:
         """Queue a new ball in front of one foot. That foot's kick policy is what proves a ball exists."""
@@ -330,6 +375,44 @@ class BridgeState:
     def submit_ground_pick(self) -> dict:
         """Queue one ground pick: beak to the floor and back up, one 4 s cycle."""
         return self.submit_trick("ground_pick")
+
+    def submit_follow_ball(self) -> dict:
+        """Queue a follow. Needs a head camera and a standing, free, upright robot."""
+        self._note_request()
+        self._require_camera()
+        self._require_not_seated("sitting, stand up first")
+        self._require_no_trick()
+        self._require_not_fallen()
+
+        self._enqueue(FollowBallCmd())
+
+        return {"following": True}
+
+    def submit_face_ball(self) -> dict:
+        """Queue a face. Needs the walker for the turn, a camera, and a standing, free, upright robot."""
+        self._note_request()
+        self._require_walking_policy()
+        self._require_camera()
+        self._require_not_seated("sitting, stand up first")
+        self._require_no_trick()
+        self._require_not_fallen()
+
+        self._enqueue(FaceBallCmd())
+
+        return {"facing": True}
+
+    def submit_go_to_ball(self) -> dict:
+        """Queue a walk to the ball. Same needs as a face: walker, camera, standing, free, upright."""
+        self._note_request()
+        self._require_walking_policy()
+        self._require_camera()
+        self._require_not_seated("sitting, stand up first")
+        self._require_no_trick()
+        self._require_not_fallen()
+
+        self._enqueue(GoToBallCmd())
+
+        return {"going": True}
 
     def submit_stop(self) -> dict:
         """Queue an immediate stop."""
@@ -399,6 +482,11 @@ class BridgeState:
         if not getattr(self._policy, trick.session, None):
             raise ValueError(f"no {name} policy loaded, start the runner with {trick.flag}")
 
+    def _require_camera(self) -> None:
+        """Reject a follow when nothing renders a head camera."""
+        if not getattr(self._policy, "camera", None):
+            raise ValueError("no head camera, start the viewer with --follow-ball")
+
     @staticmethod
     def _seated_message(name: str) -> str:
         """Why a seated robot cannot run this trick. Get up is the wrong tool for a sit."""
@@ -421,6 +509,11 @@ class BridgeState:
 
         if running or self._trick_queued():
             raise ValueError("a trick is running, wait for it")
+
+    def _require_not_fallen(self) -> None:
+        """Reject a command while the robot lies on the floor."""
+        if self.peek_status().get("fallen"):
+            raise ValueError("fallen, get up first")
 
     def _trick_queued(self) -> bool:
         """True when a trick is still waiting to be drained."""

@@ -170,8 +170,12 @@ def _idle():
     return {"ready": True, "twist": [0.0, 0.0, 0.0], "walk_seconds_left": 0.0, "gesture": None}
 
 
-def _scripted_bridge(monkeypatch, statuses):
-    """Serves the given status bodies in order, the last one forever. Records every request."""
+def _scripted_bridge(monkeypatch, statuses, replies=None):
+    """Serves the given status bodies in order, the last one forever. Records every request.
+
+    replies maps a path to the body that POST answers with, for routes that
+    reply with more than the echo.
+    """
     received = []
     remaining = list(statuses)
 
@@ -187,7 +191,8 @@ def _scripted_bridge(monkeypatch, statuses):
                 status = remaining.pop(0) if len(remaining) > 1 else remaining[0]
                 payload = json.dumps(status).encode()
             else:
-                payload = json.dumps({"echo": body, "seconds": body.get("seconds")}).encode()
+                reply = (replies or {}).get(self.path) or {"echo": body, "seconds": body.get("seconds")}
+                payload = json.dumps(reply).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -429,56 +434,264 @@ def test_roll_and_get_up_are_registered_tools():
     assert "get_up" in names
 
 
-def _kicking():
-    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "kicking"}
-
-
 def _picking():
     return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "picking"}
 
 
+def _ball(seen=False, close=False, travel=None, approach="none", trick="none"):
+    """A standing status with the ball fields a kick reads."""
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": trick, "ball_seen": seen,
+            "ball_close": close, "last_kick_travel": travel, "approach": approach, "lost": False, "at_ball": close}
+
+
+def _in_reach(**fields):
+    """A status with the ball in view and within kick reach."""
+    return _ball(seen=True, close=True, **fields)
+
+
 def test_kick_posts_the_foot_and_waits_until_the_trick_is_over(monkeypatch):
-    received, server = _scripted_bridge(monkeypatch, [_kicking(), _no_trick()])
+    received, server = _scripted_bridge(monkeypatch, [_in_reach(), _in_reach(trick="kicking"), _in_reach()])
     try:
         tools.kick.invoke({"foot": "left"})
     finally:
         server.shutdown()
 
-    assert [r[1] for r in received] == ["/kick", "/status", "/status"]
+    assert [r[1] for r in received] == ["/status", "/kick", "/status", "/status", "/status"]
     assert _commands(received) == [("POST", "/kick", {"foot": "left"})]
 
 
-def test_kick_defaults_to_the_right_foot(monkeypatch):
-    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+def test_kick_defaults_to_the_auto_foot(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_in_reach()])
     try:
         tools.kick.invoke({})
     finally:
         server.shutdown()
 
-    assert _commands(received) == [("POST", "/kick", {"foot": "right"})]
+    assert _commands(received) == [("POST", "/kick", {"foot": "auto"})]
+
+
+def test_kick_reports_the_foot_the_bridge_picked(monkeypatch):
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach()], {"/kick": {"trick": "kick_left"}})
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["foot"] == "left"
+
+
+def test_kick_walks_up_first_when_the_ball_is_seen_further_away(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=True), _ball(seen=True, close=True, travel=0.5,
+                                                                             approach="arrived")])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/go_to_ball", "/kick"]
+    assert result["walked_up"] is True
+
+
+def test_kick_skips_the_swing_when_the_walk_up_gave_up(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=True), _ball(seen=True, approach="gave_up")])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/go_to_ball"]
+    assert result["approach"] == "gave_up"
+
+
+def test_kick_skips_the_swing_when_the_walk_up_is_still_walking(monkeypatch):
+    monkeypatch.setattr(tools, "GO_TO_BALL_MAX_WAIT_S", 1.0)
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=True), _ball(seen=True, approach="walking")])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/go_to_ball"]
+    assert result["approach"] == "walking"
+
+
+def test_kick_does_not_walk_up_or_look_when_the_ball_is_already_close(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_in_reach(travel=0.5)])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/kick"]
+    assert result["walked_up"] is False
+    assert result["looked"] is False
+
+
+def test_kick_looks_for_the_ball_when_it_is_not_in_view(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=False), _in_reach(travel=0.5)])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/follow_ball", "/kick"]
+    assert result["looked"] is True
+
+
+def test_kick_gives_up_looking_after_its_own_cap(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=False, trick="kicking")])
+    try:
+        tools.kick.invoke({})
+    finally:
+        server.shutdown()
+
+    looking = int(tools.LOOK_FOR_BALL_S / tools.IDLE_POLL_S)
+    kicking = int((tools.KICK_SECONDS + tools.TRICK_WAIT_MARGIN_S) / tools.IDLE_POLL_S)
+
+    # One read before the look, one after it, and one after the kick.
+    assert len(_polls(received)) == looking + kicking + 3
+    assert [r[1] for r in _commands(received)] == ["/follow_ball", "/stop", "/kick"]
+
+
+def test_a_look_that_finds_no_ball_stops_the_head(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=False)], {"/kick": {"error": "no ball in view"}})
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/follow_ball", "/stop", "/kick"]
+    assert result == {"error": "no ball in view"}
+
+
+def test_a_look_that_finds_the_ball_leaves_the_follow_running(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=False), _in_reach(travel=0.5)])
+    try:
+        tools.kick.invoke({})
+    finally:
+        server.shutdown()
+
+    assert "/stop" not in [r[1] for r in _commands(received)]
+
+
+def test_kick_still_kicks_when_the_look_is_rejected(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=False)])
+    posted = tools._post
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "no head camera"})
+                        if path == "/follow_ball" else posted(path, body))
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/kick"]
+    assert result["looked"] is False
+
+
+def test_kick_returns_at_once_when_the_first_status_read_fails(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [{"error": "bridge unreachable"}])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result == {"error": "bridge unreachable"}
+    assert _commands(received) == []
+
+
+def test_kick_passes_a_failed_status_read_after_the_kick_through(monkeypatch):
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach(), {"error": "bridge unreachable"}])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result == {"error": "bridge unreachable"}
+
+
+def test_kick_says_kicked_when_the_ball_travelled(monkeypatch):
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach(), _in_reach(travel=0.5)])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["kicked"] is True
+    assert result["travel"] == 0.5
+
+
+def test_kick_says_missed_when_the_ball_barely_moved(monkeypatch):
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach(), _in_reach(travel=0.1)])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["kicked"] is False
+    assert result["travel"] == 0.1
+
+
+def test_kick_cannot_tell_when_the_status_has_no_travel_field(monkeypatch):
+    after = _in_reach()
+    del after["last_kick_travel"]
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach(), after])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["kicked"] is None
+    assert result["travel"] is None
+
+
+def test_kick_cannot_tell_when_the_travel_is_null(monkeypatch):
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach(), _in_reach(travel=None)])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["kicked"] is None
+    assert result["travel"] is None
 
 
 def test_kick_wait_gives_up_after_the_cap_from_the_kick_seconds(monkeypatch):
-    received, server = _scripted_bridge(monkeypatch, [_kicking()])
+    received, server = _scripted_bridge(monkeypatch, [_in_reach(trick="kicking")])
     try:
         tools.kick.invoke({})
     finally:
         server.shutdown()
 
     cap = tools.KICK_SECONDS + tools.TRICK_WAIT_MARGIN_S
-    assert len(_polls(received)) == int(cap / tools.IDLE_POLL_S)
+
+    # One read before the kick and one after, around the polls of the wait.
+    assert len(_polls(received)) == int(cap / tools.IDLE_POLL_S) + 2
 
 
 def test_kick_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
-    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+    received, server = _scripted_bridge(monkeypatch, [_in_reach()])
     monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "sitting, stand up first"}))
     try:
         result = json.loads(tools.kick.invoke({}))
     finally:
         server.shutdown()
 
-    assert "error" in result
-    assert _polls(received) == []
+    assert result == {"error": "sitting, stand up first"}
+    assert len(_polls(received)) == 1
+
+
+def test_kick_returns_a_walk_up_error_without_kicking(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=True)])
+    posted = tools._post
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "fallen, get up first"})
+                        if path == "/go_to_ball" else posted(path, body))
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result == {"error": "fallen, get up first"}
+    assert _commands(received) == []
 
 
 def test_new_ball_posts_the_foot_and_does_not_wait(monkeypatch):
@@ -520,3 +733,164 @@ def test_kick_new_ball_and_ground_pick_are_registered_tools():
     assert "kick" in names
     assert "new_ball" in names
     assert "ground_pick" in names
+
+
+def test_follow_ball_posts_and_does_not_wait(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_no_trick()])
+    try:
+        result = json.loads(tools.follow_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert _commands(received) == [("POST", "/follow_ball", {})]
+    assert _polls(received) == []
+    assert result["echo"] == {}
+
+
+def test_follow_ball_is_a_registered_tool():
+    assert "follow_ball" in [t.name for t in tools.ALL_TOOLS]
+
+
+def _turning():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": True}
+
+
+def _faced():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": False,
+            "lost": False}
+
+
+def _lost():
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "turning": False,
+            "lost": True}
+
+
+def test_face_ball_posts_and_waits_until_the_body_stops_turning(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_turning(), _turning(), _faced()])
+    try:
+        result = tools.face_ball.invoke({})
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/face_ball", "/status", "/status", "/status", "/status"]
+    assert _commands(received) == [("POST", "/face_ball", {})]
+    assert json.loads(result)["lost"] is False
+
+
+def test_face_ball_wait_gives_up_after_its_cap(monkeypatch):
+    monkeypatch.setattr(tools, "FACE_MAX_WAIT_S", 1.0)
+    received, server = _scripted_bridge(monkeypatch, [_turning()])
+    try:
+        tools.face_ball.invoke({})
+    finally:
+        server.shutdown()
+
+    assert len(_polls(received)) == 1 + int(tools.FACE_MAX_WAIT_S / tools.IDLE_POLL_S)
+
+
+def test_face_ball_reports_a_lost_ball(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_turning(), _lost()])
+    try:
+        result = json.loads(tools.face_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["lost"] is True
+    assert result["turning"] is False
+
+
+def test_face_ball_reports_an_unfinished_turn(monkeypatch):
+    monkeypatch.setattr(tools, "FACE_MAX_WAIT_S", 0.5)
+    received, server = _scripted_bridge(monkeypatch, [_turning()])
+    try:
+        result = json.loads(tools.face_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["turning"] is True
+    assert result["lost"] is False
+
+
+def test_face_ball_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_faced()])
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "no head camera"}))
+    try:
+        result = json.loads(tools.face_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert "error" in result
+    assert _polls(received) == []
+
+
+def test_face_ball_is_a_registered_tool():
+    assert "face_ball" in [t.name for t in tools.ALL_TOOLS]
+
+
+def _approaching(state, at_ball=False):
+    return {"ready": True, "twist": [0.0, 0.0, 0.0], "posture": "standing", "trick": "none", "approach": state,
+            "lost": False, "at_ball": at_ball}
+
+
+def test_go_to_ball_posts_and_waits_until_arrived(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("walking"), _approaching("walking"),
+                                                       _approaching("arrived", at_ball=True)])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in received] == ["/go_to_ball", "/status", "/status", "/status"]
+    assert result["approach"] == "arrived"
+    assert result["at_ball"] is True
+
+
+def test_go_to_ball_skips_the_stale_none_before_the_walk_starts(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("none"), _approaching("walking"),
+                                                       _approaching("arrived", at_ball=True)])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["approach"] == "arrived"
+    assert result["at_ball"] is True
+    assert len(_polls(received)) == 3
+
+
+def test_go_to_ball_reports_giving_up(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("gave_up")])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["approach"] == "gave_up"
+
+
+def test_go_to_ball_wait_gives_up_after_its_cap(monkeypatch):
+    monkeypatch.setattr(tools, "GO_TO_BALL_MAX_WAIT_S", 1.0)
+    received, server = _scripted_bridge(monkeypatch, [_approaching("walking")])
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert len(_polls(received)) == int(tools.GO_TO_BALL_MAX_WAIT_S / tools.IDLE_POLL_S)
+    assert result["approach"] == "walking"
+
+
+def test_go_to_ball_returns_at_once_when_the_bridge_rejects_it(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_approaching("none")])
+    monkeypatch.setattr(tools, "_post", lambda path, body: json.dumps({"error": "fallen, get up first"}))
+    try:
+        result = json.loads(tools.go_to_ball.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert "error" in result
+    assert _polls(received) == []
+
+
+def test_go_to_ball_is_a_registered_tool():
+    assert "go_to_ball" in [t.name for t in tools.ALL_TOOLS]

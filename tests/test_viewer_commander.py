@@ -1,6 +1,8 @@
 """ViewerCommander applies bridge commands to a fake env's command terms."""
+import math
 import os
 import sys
+import types
 
 import pytest
 import torch
@@ -8,10 +10,23 @@ import torch
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
+from bridge.follower import (
+    APPROACH_SPEED,
+    ARRIVE_PITCH,
+    CLOSE_PITCH_MARGIN,
+    FACE_START,
+    FACE_STOP,
+    FACE_TURN_MIN,
+    HUNT_RATE,
+    LOST_AFTER_S,
+    SEARCH_PITCH,
+    TAN_HALF_WIDTH,
+)
 from bridge.state import (
     BRAIN_TIMEOUT_S,
     GET_UP_SECONDS,
     GROUND_PICK_SECONDS,
+    KICK_LEAD_S,
     KICK_SECONDS,
     NO_TRICK,
     ROLL_SECONDS,
@@ -22,6 +37,9 @@ from bridge.state import (
 from bridge.watchdog import BrainWatchdog
 from viewer_commander import (
     GESTURE_SECONDS,
+    HEAD_PITCH,
+    HEAD_YAW,
+    PICTURE_EVERY,
     RISE_SECONDS,
     ViewerCommander,
     ViewerLimits,
@@ -58,12 +76,20 @@ class _Robot:
         root_link_quat_w = torch.tensor([[0.7071068, 0.0, 0.0, 0.7071068]])
 
 
+class _BallData:
+    """The one field the commander reads off a ball, as the sim reports it."""
+
+    def __init__(self):
+        self.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.03]])
+
+
 class _Ball:
-    """Records the root writes the commander makes."""
+    """Records the root writes the commander makes, and reports a world position."""
 
     def __init__(self):
         self.poses = []
         self.velocities = []
+        self.data = _BallData()
 
     def write_root_link_pose_to_sim(self, pose, env_ids=None):
         self.poses.append(pose[0].tolist())
@@ -72,12 +98,49 @@ class _Ball:
         self.velocities.append(velocity[0].tolist())
 
 
+class _CameraData:
+    def __init__(self):
+        self.rgb = torch.zeros(1, 120, 160, 3, dtype=torch.uint8)
+
+
+class _Camera:
+    """A picture the tests paint: black, with an orange dot where the test puts it."""
+
+    def __init__(self):
+        self._data = _CameraData()
+        self.reads = 0
+
+    @property
+    def data(self):
+        self.reads += 1
+        return self._data
+
+    def paint(self, col, row, radius=4):
+        self._data.rgb.zero_()
+        self._data.rgb[0, row - radius:row + radius, col - radius:col + radius] = torch.tensor(
+            [255, 140, 0], dtype=torch.uint8)
+
+    def clear(self):
+        self._data.rgb.zero_()
+
+
+class _FallenRobot:
+    class data:
+        projected_gravity_b = torch.tensor([[0.0, 0.0, 0.0]])
+        root_link_lin_vel_b = torch.tensor([[0.0, 0.0, 0.0]])
+        root_link_ang_vel_b = torch.tensor([[0.0, 0.0, 0.0]])
+        root_link_pos_w = torch.tensor([[1.0, 2.0, 0.05]])
+        root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+
+
 class _Env:
-    def __init__(self, ball: bool = False):
+    def __init__(self, ball: bool = False, camera: bool = False):
         self.command_manager = _Manager()
         self.scene = {"robot": _Robot()}
         if ball:
             self.scene["ball"] = _Ball()
+        if camera:
+            self.scene["head_camera"] = _Camera()
         self.resets = 0
         self.device = "cpu"
 
@@ -85,8 +148,16 @@ class _Env:
         self.resets += 1
 
 
-def _setup(sit_session=False, roll=False, get_up=False, kick_right=False, kick_left=False, ground_pick=False):
-    env = _Env(ball=kick_right or kick_left)
+def _setup(
+    sit_session=False,
+    roll=False,
+    get_up=False,
+    kick_right=False,
+    kick_left=False,
+    ground_pick=False,
+    camera=False,
+):
+    env = _Env(ball=kick_right or kick_left, camera=camera)
     limits = ViewerLimits(
         sit_session=sit_session,
         roulade_session=roll,
@@ -94,6 +165,7 @@ def _setup(sit_session=False, roll=False, get_up=False, kick_right=False, kick_l
         kick_right_session=kick_right,
         kick_left_session=kick_left,
         ground_pick_session=ground_pick,
+        camera=camera,
     )
     state = BridgeState(limits)
     commander = ViewerCommander(env, state, DT)
@@ -515,18 +587,46 @@ def test_kick_is_offered_only_with_its_own_policy():
 def test_kick_swaps_to_its_own_policy_and_zeroes_the_command():
     env, state, commander = _setup(kick_right=True)
     state.submit_kick("right")
-    commander.tick()
+    _tick_for(commander, KICK_LEAD_S)
     assert commander.active_policy() == "kick_right"
     assert _twist(env) == [0.0, 0.0, 0.0]
     assert _head(env) == [0.0, 0.0, 0.0, 0.0]
     assert state.get_status()["trick"] == "kicking"
 
 
+def test_a_kick_walks_on_a_zero_command_before_the_swing():
+    env, state, commander = _setup(kick_right=True)
+    state.submit_kick("right")
+    commander.tick()
+    assert commander.active_policy() == "walking"
+    assert state.get_status()["trick"] == "kicking"
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_the_kick_policy_waits_out_the_lead():
+    _env, state, commander = _setup(kick_right=True)
+    state.submit_kick("right")
+    _tick_for(commander, KICK_LEAD_S - 4 * DT)
+    assert commander.active_policy() == "walking"
+    _tick_for(commander, 4 * DT)
+    assert commander.active_policy() == "kick_right"
+
+
+def test_a_walk_during_the_kick_lead_is_refused():
+    _env, state, commander = _setup(kick_right=True)
+    state.submit_kick("right")
+    commander.tick()
+    with pytest.raises(ValueError, match="trick is running"):
+        state.submit_walk(0.2, 0.0, 0.0, 2.0)
+
+
 def test_kick_hands_back_to_walking_at_the_timer():
     _env, state, commander = _setup(kick_left=True)
     state.submit_kick("left")
-    commander.tick()
-    _tick_for(commander, KICK_SECONDS)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS - 4 * DT)
+    assert state.get_status()["trick"] == "kicking"
+    _tick_for(commander, 4 * DT)
     assert commander.active_policy() == "walking"
     assert state.get_status()["trick"] == NO_TRICK
 
@@ -616,3 +716,712 @@ def test_ground_pick_hands_back_to_walking_at_four_seconds():
     assert commander.active_policy() == "walking"
     assert state.get_status()["trick"] == NO_TRICK
     assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def _following_setup(col=120, row=60):
+    """A commander with a camera, a ball painted in the picture, one tick into the follow."""
+    env, state, commander = _setup(kick_right=True, camera=True)
+    env.scene["head_camera"].paint(col, row)
+    state.submit_follow_ball()
+    commander.tick()
+    return env, state, commander
+
+
+def _pictures(commander, count):
+    """Enough ticks for this many pictures."""
+    _ticks(commander, count * PICTURE_EVERY)
+
+
+def test_follow_ball_is_offered_only_with_a_camera():
+    _env, state, commander = _setup(kick_right=True)
+    commander.tick()
+    assert state.get_status()["actions"]["follow ball"] is False
+
+    _env, state, commander = _setup(kick_right=True, camera=True)
+    commander.tick()
+    assert state.get_status()["actions"]["follow ball"] is True
+
+
+def test_follow_ball_without_a_camera_is_refused():
+    _env, state, _commander = _setup(kick_right=True)
+    with pytest.raises(ValueError, match="no head camera"):
+        state.submit_follow_ball()
+
+
+def test_the_picture_is_read_every_fifth_tick():
+    env, _state, commander = _following_setup()
+    camera = env.scene["head_camera"]
+    _ticks(commander, PICTURE_EVERY - 2)
+    assert camera.reads == 0
+    commander.tick()
+    assert camera.reads == 1
+    _ticks(commander, PICTURE_EVERY)
+    assert camera.reads == 2
+
+
+def test_a_ball_on_the_right_turns_the_head_right():
+    env, _state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_YAW] < 0.0
+    assert _head(env)[HEAD_PITCH] == pytest.approx(0.0, abs=0.01)
+
+
+def test_a_ball_low_in_the_picture_tilts_the_head_down():
+    env, _state, commander = _following_setup(col=80, row=100)
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_PITCH] > 0.0
+    assert _head(env)[HEAD_YAW] == pytest.approx(0.0, abs=0.01)
+
+
+def test_the_head_keeps_moving_until_the_ball_is_centred():
+    env, _state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    first = _head(env)[HEAD_YAW]
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_YAW] < first
+
+
+def test_status_reports_the_follow_and_the_sighting():
+    _env, state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    status = state.get_status()
+    assert status["following"] is True
+    assert status["ball_seen"] is True
+    assert status["searching"] is False
+    assert status["ball"]["x"] > 0.4
+    assert status["ball"]["size"] == 64
+
+
+def test_an_empty_picture_reports_no_ball_then_a_search():
+    env, state, commander = _following_setup()
+    env.scene["head_camera"].clear()
+    _pictures(commander, 1)
+    status = state.get_status()
+    assert status["ball_seen"] is False
+    assert status["ball"] is None
+    assert status["searching"] is False
+
+    _tick_for(commander, LOST_AFTER_S)
+    status = state.get_status()
+    assert status["searching"] is True
+    assert _head(env)[HEAD_PITCH] == pytest.approx(SEARCH_PITCH)
+    assert _head(env)[HEAD_YAW] != 0.0
+
+
+def test_stop_ends_the_follow_and_zeroes_the_head():
+    env, state, commander = _following_setup()
+    _pictures(commander, 1)
+    state.submit_stop()
+    commander.tick()
+    assert state.get_status()["following"] is False
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_a_look_takes_the_head_back():
+    env, state, commander = _following_setup()
+    _pictures(commander, 1)
+    state.submit_look(0.2, 0.3)
+    commander.tick()
+    _pictures(commander, 2)
+    assert state.get_status()["following"] is False
+    assert _head(env) == pytest.approx([0.0, 0.2, 0.3, 0.0])
+
+
+def test_a_gesture_ends_the_follow():
+    _env, state, commander = _following_setup()
+    state.submit_gesture("nod")
+    commander.tick()
+    assert state.get_status()["following"] is False
+
+
+def test_a_gesture_after_a_follow_starts_from_home():
+    env, state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_YAW] != 0.0
+
+    state.submit_gesture("nod")
+    commander.tick()
+    assert _head(env)[HEAD_YAW] == 0.0
+
+
+def test_a_sit_ends_the_follow():
+    _env, state, commander = _setup(sit_session=True, kick_right=True, camera=True)
+    state.submit_follow_ball()
+    commander.tick()
+    state.submit_posture(True)
+    commander.tick()
+    assert state.get_status()["following"] is False
+
+
+def test_a_trick_ends_the_follow():
+    _env, state, commander = _following_setup()
+    state.submit_kick("right")
+    commander.tick()
+    assert state.get_status()["following"] is False
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
+    assert state.get_status()["following"] is False
+
+
+def test_a_walk_keeps_the_follow():
+    env, state, commander = _following_setup(col=120, row=60)
+    state.submit_walk(0.2, 0.0, 0.0, 2.0)
+    commander.tick()
+    _pictures(commander, 1)
+    assert state.get_status()["following"] is True
+    assert _twist(env) == pytest.approx([0.2, 0.0, 0.0])
+    assert _head(env)[HEAD_YAW] < 0.0
+
+
+def test_a_fall_pauses_the_head_moves_and_keeps_the_follow():
+    env, state, commander = _following_setup(col=120, row=60)
+    env.scene["robot"] = _FallenRobot()
+    _pictures(commander, 2)
+    assert env.scene["head_camera"].reads == 0
+    assert _head(env)[HEAD_YAW] == 0.0
+    status = state.get_status()
+    assert status["following"] is True
+    assert status["fallen"] is True
+
+    env.scene["robot"] = _Robot()
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_YAW] < 0.0
+
+
+def test_the_watchdog_leaves_a_running_follow_alone():
+    env, state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    _tick_silently(commander, BRAIN_TIMEOUT_S + 1.0)
+    assert state.peek_status()["following"] is True
+    assert _head(env)[HEAD_YAW] < 0.0
+
+
+def test_reset_ends_the_follow():
+    _env, state, commander = _following_setup()
+    state.submit_reset()
+    commander.tick()
+    assert state.get_status()["following"] is False
+
+
+def _facing_setup(col=120, row=60):
+    """A commander with a camera and a walker, a ball painted, one tick into the face."""
+    env, state, commander = _setup(kick_right=True, camera=True)
+    env.scene["head_camera"].paint(col, row)
+    state.submit_face_ball()
+    commander.tick()
+    return env, state, commander
+
+
+def _turn_head_past_start(commander, pictures=4):
+    """Enough pictures for a ball at the picture edge to push the head yaw past FACE_START."""
+    _pictures(commander, pictures)
+
+
+def test_face_ball_is_offered_only_with_a_camera():
+    _env, state, commander = _setup(kick_right=True, camera=True)
+    commander.tick()
+    assert state.get_status()["actions"]["face ball"] is True
+
+    _env, state, commander = _setup(kick_right=True)
+    commander.tick()
+    assert state.get_status()["actions"]["face ball"] is False
+
+
+def test_facing_starts_the_follow_too():
+    _env, state, _commander = _facing_setup()
+    status = state.get_status()
+    assert status["facing"] is True
+    assert status["following"] is True
+
+
+def test_the_body_turns_right_once_the_head_looks_far_right():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    assert _head(env)[HEAD_YAW] < -FACE_START
+    assert _twist(env)[2] < 0.0
+    assert _twist(env)[0] == 0.0
+    assert state.get_status()["turning"] is True
+
+
+def test_the_body_holds_while_the_ball_is_straight_ahead():
+    # Col 80 is the picture's true middle, so the bearing here is 0 rad.
+    env, state, commander = _facing_setup(col=80, row=60)
+    _pictures(commander, 2)
+    assert abs(_head(env)[HEAD_YAW]) < FACE_STOP
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert state.get_status()["turning"] is False
+
+
+def test_the_turn_stays_under_the_envelope():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _pictures(commander, 20)
+    assert _twist(env)[2] == pytest.approx(-state.policy().vel_max_ang)
+
+
+def test_a_chat_walk_ends_the_face_and_keeps_the_follow():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    state.submit_walk(0.2, 0.0, 0.0, 2.0)
+    commander.tick()
+    status = state.get_status()
+    assert status["facing"] is False
+    assert status["following"] is True
+    assert _twist(env) == pytest.approx([0.2, 0.0, 0.0])
+
+
+def test_a_follow_during_a_face_ends_the_turn_and_keeps_following():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    state.submit_follow_ball()
+    commander.tick()
+    status = state.get_status()
+    assert status["facing"] is False
+    assert status["following"] is True
+    assert status["turning"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_stop_ends_the_face():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    state.submit_stop()
+    commander.tick()
+    assert state.get_status()["facing"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_trick_ends_the_face():
+    _env, state, commander = _facing_setup()
+    state.submit_kick("right")
+    commander.tick()
+    assert state.get_status()["facing"] is False
+
+
+def test_a_fall_ends_the_face():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    env.scene["robot"] = _FallenRobot()
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    status = state.get_status()
+    assert status["facing"] is False
+    assert status["turning"] is False
+    assert status["following"] is True
+
+
+def test_the_watchdog_ends_the_face_and_keeps_the_follow():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _tick_silently(commander, BRAIN_TIMEOUT_S + 1.0)
+    status = state.peek_status()
+    assert status["facing"] is False
+    assert status["following"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_follow_ball_alone_never_turns_the_body():
+    env, _state, commander = _following_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    assert _head(env)[HEAD_YAW] < -FACE_START
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+class _TurningRobot:
+    """A standing robot whose heading the test sets."""
+
+    def __init__(self):
+        self.data = types.SimpleNamespace(
+            projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]),
+            root_link_lin_vel_b=torch.tensor([[0.0, 0.0, 0.0]]),
+            root_link_ang_vel_b=torch.tensor([[0.0, 0.0, 0.0]]),
+            root_link_pos_w=torch.tensor([[1.0, 2.0, 0.11]]),
+            root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        )
+
+    def face(self, yaw):
+        self.data.root_link_quat_w = torch.tensor([[math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]])
+
+
+def _lose_the_ball(env, commander):
+    """Clear the picture and wait until the follower searches."""
+    env.scene["head_camera"].clear()
+    _tick_for(commander, LOST_AFTER_S)
+    _pictures(commander, 1)
+
+
+def _bearing_at(col, yaw):
+    """The bearing for a ball painted at this column, given the head yaw after that picture."""
+    x = col / 80 - 1
+    return yaw - math.atan(x * TAN_HALF_WIDTH)
+
+
+def _hunt_until_lost(env, commander):
+    """Spin the fake body past a full turn with no ball in view."""
+    robot = _TurningRobot()
+    env.scene["robot"] = robot
+    for step in range(1, 16):
+        robot.face(-0.5 * step)
+        _pictures(commander, 1)
+
+
+def test_a_lost_ball_turns_the_body_the_way_the_head_looked():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    assert _twist(env) == pytest.approx([0.0, 0.0, -HUNT_RATE])
+    status = state.get_status()
+    assert status["turning"] is True
+    assert status["lost"] is False
+
+
+def test_a_sighting_during_the_hunt_hands_back_to_the_turner():
+    # Col 36 puts the bearing inside the FACE_STOP..FACE_START gap: without the handover's
+    # engage() call the turner would stay off here, so this proves engage() ran.
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    env.scene["head_camera"].paint(36, 60)
+    _pictures(commander, 1)
+    yaw = _head(env)[HEAD_YAW]
+    bearing = _bearing_at(36, yaw)
+    assert FACE_STOP < abs(bearing) < FACE_START
+    assert _twist(env)[2] == pytest.approx(math.copysign(FACE_TURN_MIN, bearing))
+    assert state.get_status()["lost"] is False
+
+
+def test_a_full_turn_without_the_ball_gives_up():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    status = state.get_status()
+    assert status["lost"] is True
+    assert status["facing"] is False
+    assert status["following"] is False
+    assert status["turning"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert _head(env) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_a_new_face_clears_lost():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    env.scene["head_camera"].paint(120, 60)
+    state.submit_face_ball()
+    commander.tick()
+    status = state.get_status()
+    assert status["lost"] is False
+    assert status["facing"] is True
+
+
+def test_stop_clears_lost():
+    env, state, commander = _facing_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    state.submit_stop()
+    commander.tick()
+    assert state.get_status()["lost"] is False
+
+
+def test_a_plain_follow_never_hunts():
+    env, state, commander = _following_setup(col=156, row=60)
+    _turn_head_past_start(commander)
+    _lose_the_ball(env, commander)
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    assert state.get_status()["lost"] is False
+
+
+def test_a_ball_a_little_to_the_right_turns_the_body_before_the_head_gets_there():
+    env, state, commander = _facing_setup(col=130, row=60)
+    _pictures(commander, 1)
+    yaw = _head(env)[HEAD_YAW]
+    assert -FACE_STOP < yaw < 0.0
+    assert _twist(env)[2] < -FACE_START
+    assert state.get_status()["turning"] is True
+
+
+def test_the_handover_from_the_hunt_closes_the_last_bit():
+    # Col 60 puts the bearing inside the FACE_STOP..FACE_START gap, same reason as above.
+    env, _state, commander = _facing_setup(col=156, row=60)
+    _pictures(commander, 2)
+    _lose_the_ball(env, commander)
+    env.scene["head_camera"].paint(60, 60)
+    _pictures(commander, 1)
+    yaw = _head(env)[HEAD_YAW]
+    bearing = _bearing_at(60, yaw)
+    assert FACE_STOP < abs(bearing) < FACE_START
+    assert _twist(env)[2] == pytest.approx(math.copysign(FACE_TURN_MIN, bearing))
+
+
+def _going_setup(col=80, row=70):
+    """A commander with a camera and a walker, a ball a little ahead, one tick into the approach."""
+    env, state, commander = _setup(kick_right=True, camera=True)
+    env.scene["head_camera"].paint(col, row)
+    state.submit_go_to_ball()
+    commander.tick()
+    return env, state, commander
+
+
+def test_go_to_ball_is_offered_only_with_a_camera():
+    _env, state, commander = _setup(kick_right=True, camera=True)
+    commander.tick()
+    assert state.get_status()["actions"]["go to ball"] is True
+
+    _env, state, commander = _setup(kick_right=True)
+    commander.tick()
+    assert state.get_status()["actions"]["go to ball"] is False
+
+
+def test_going_starts_the_face_and_the_follow():
+    _env, state, commander = _going_setup()
+    status = state.get_status()
+    assert status["following"] is True
+    assert status["facing"] is True
+    assert status["approach"] in ("lost", "walking")
+    assert status["at_ball"] is False
+
+
+def test_a_ball_ahead_means_walking_forward_slowly():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    # float32 rounding on the command tensor, not the picture math: approx, not ==.
+    assert _twist(env)[0] == pytest.approx(APPROACH_SPEED)
+    assert _twist(env)[2] == 0.0
+    assert state.get_status()["approach"] == "walking"
+
+
+def test_a_ball_far_to_the_side_means_turning_first():
+    env, state, commander = _going_setup(col=156, row=60)
+    _pictures(commander, 4)
+    assert _twist(env)[0] == 0.0
+    assert _twist(env)[2] < 0.0
+    assert state.get_status()["approach"] == "turning"
+
+
+def test_the_head_looking_far_down_means_arrived():
+    env, state, commander = _going_setup(col=80, row=118)
+    _pictures(commander, 12)
+    assert _head(env)[HEAD_PITCH] >= ARRIVE_PITCH
+    assert _twist(env) == [0.0, 0.0, 0.0]
+    status = state.get_status()
+    assert status["approach"] == "arrived"
+    assert status["at_ball"] is True
+    assert status["following"] is True
+
+
+def test_an_arrived_robot_never_hunts_when_the_ball_drops_out_of_view():
+    env, state, commander = _going_setup(col=80, row=118)
+    _pictures(commander, 12)
+    assert state.get_status()["at_ball"] is True
+    env.scene["head_camera"].clear()
+    _tick_for(commander, LOST_AFTER_S)
+    _pictures(commander, 2)
+    status = state.get_status()
+    assert status["searching"] is True
+    assert status["turning"] is False
+    assert status["at_ball"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_turning_reads_false_once_arrived():
+    env, state, commander = _going_setup(col=100, row=118)
+    _pictures(commander, 12)
+    status = state.get_status()
+    assert status["at_ball"] is True
+    assert status["turning"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_lost_ball_stops_the_walk():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    env.scene["head_camera"].clear()
+    _pictures(commander, 1)
+    assert _twist(env)[0] == 0.0
+    assert state.get_status()["approach"] == "lost"
+
+
+def test_a_chat_walk_ends_the_approach():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    state.submit_walk(0.2, 0.0, 0.0, 2.0)
+    commander.tick()
+    status = state.get_status()
+    assert status["approach"] == "none"
+    assert status["facing"] is False
+    assert _twist(env) == pytest.approx([0.2, 0.0, 0.0])
+
+
+def test_stop_ends_the_approach():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    state.submit_stop()
+    commander.tick()
+    assert state.get_status()["approach"] == "none"
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_fall_stops_the_walk_at_once():
+    env, _state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    env.scene["robot"] = _FallenRobot()
+    commander.tick()
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_the_watchdog_ends_the_approach_and_keeps_the_follow():
+    env, state, commander = _going_setup(col=80, row=70)
+    _pictures(commander, 1)
+    _tick_silently(commander, BRAIN_TIMEOUT_S + 1.0)
+    status = state.peek_status()
+    assert status["approach"] == "none"
+    assert status["following"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_arrival_zeroes_the_turn_in_the_same_picture():
+    # The turner is latched and turning at arrival, row 118 crosses ARRIVE_PITCH on the 8th picture.
+    env, state, commander = _going_setup(col=100, row=118)
+    _pictures(commander, 8)
+    status = state.get_status()
+    assert status["at_ball"] is True
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def test_a_hunt_that_gives_up_ends_the_approach_with_lost():
+    env, state, commander = _going_setup(col=156, row=60)
+    _pictures(commander, 4)
+    _lose_the_ball(env, commander)
+    _hunt_until_lost(env, commander)
+    status = state.get_status()
+    assert status["approach"] == "none"
+    assert status["lost"] is True
+    assert status["at_ball"] is False
+    assert status["facing"] is False
+    assert _twist(env) == [0.0, 0.0, 0.0]
+
+
+def _place_the_ball(env, x, y):
+    """Put the fake ball at a world spot, the way the sim would report it."""
+    env.scene["ball"].data.root_link_pos_w = torch.tensor([[x, y, 0.03]])
+
+
+def test_status_has_no_ball_side_and_no_kick_travel_before_anything_runs():
+    _env, state, commander = _setup(kick_right=True, camera=True)
+    commander.tick()
+    status = state.get_status()
+    assert status["ball_side"] is None
+    assert status["ball_close"] is False
+    assert status["last_kick_travel"] is None
+
+
+def test_a_head_turned_left_gives_left_even_with_the_ball_right_in_the_picture():
+    _env, state, commander = _following_setup(col=120, row=60)
+    _pictures(commander, 1)
+    commander._head[HEAD_YAW] = 0.1
+    commander.tick()
+    assert state.get_status()["ball_side"] == "left"
+
+
+def test_a_head_turned_right_gives_right_even_with_the_ball_left_in_the_picture():
+    _env, state, commander = _following_setup(col=40, row=60)
+    _pictures(commander, 1)
+    commander._head[HEAD_YAW] = -0.1
+    commander.tick()
+    assert state.get_status()["ball_side"] == "right"
+
+
+def test_a_ball_at_the_kick_spot_reads_as_close():
+    env, state, commander = _going_setup(col=80, row=118)
+    _pictures(commander, 12)
+    assert _head(env)[HEAD_PITCH] >= ARRIVE_PITCH
+    assert state.get_status()["ball_close"] is True
+
+
+def test_a_ball_the_head_barely_looks_down_at_is_not_close():
+    env, state, commander = _following_setup(col=80, row=60)
+    _pictures(commander, 1)
+    assert _head(env)[HEAD_PITCH] < ARRIVE_PITCH - CLOSE_PITCH_MARGIN
+    assert state.get_status()["ball_close"] is False
+
+
+def test_a_kick_reports_how_far_it_sent_the_ball():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
+
+
+def test_a_second_kick_overwrites_the_travel():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
+
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.4, 2.4)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.1)
+
+
+def test_a_roll_leaves_the_kick_travel_alone():
+    env, state, commander = _setup(kick_right=True, roll=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
+
+    state.submit_trick("roll")
+    commander.tick()
+    _place_the_ball(env, 5.0, 5.0)
+    _tick_for(commander, ROLL_SECONDS)
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
+
+
+def test_a_kick_cut_short_reports_no_travel_of_its_own():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
+
+    state.submit_kick("right")
+    commander.tick()
+    state.submit_reset()
+    commander.tick()
+    assert state.get_status()["last_kick_travel"] is None
+
+
+def test_a_reset_during_a_kick_reports_no_travel_at_all():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.1, 2.0)
+    state.submit_reset()
+    commander.tick()
+    assert state.get_status()["last_kick_travel"] is None
+
+
+def test_a_reset_after_a_kick_has_ended_keeps_its_travel():
+    env, state, commander = _setup(kick_right=True)
+    _place_the_ball(env, 1.0, 2.0)
+    state.submit_kick("right")
+    commander.tick()
+    _place_the_ball(env, 1.3, 2.4)
+    _tick_for(commander, KICK_LEAD_S + KICK_SECONDS)
+
+    state.submit_reset()
+    commander.tick()
+    assert state.get_status()["last_kick_travel"] == pytest.approx(0.5)
