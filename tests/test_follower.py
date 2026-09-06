@@ -343,16 +343,16 @@ def test_a_ball_out_of_view_has_no_side():
     assert ball_side(0.4, None) is None
 
 
-def test_a_positive_bearing_puts_the_ball_on_the_left():
-    assert ball_side(0.4, _seen()) == "left"
+def test_head_yaw_left_puts_the_ball_on_the_left():
+    assert ball_side(0.1, _seen()) == "left"
 
 
-def test_a_negative_bearing_puts_the_ball_on_the_right():
-    assert ball_side(-0.4, _seen()) == "right"
-
-
-def test_a_ball_straight_ahead_reads_as_the_right_side():
+def test_head_yaw_zero_puts_the_ball_on_the_right():
     assert ball_side(0.0, _seen()) == "right"
+
+
+def test_head_yaw_right_puts_the_ball_on_the_right():
+    assert ball_side(-0.1, _seen()) == "right"
 
 
 def test_a_ball_out_of_view_is_never_close():

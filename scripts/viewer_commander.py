@@ -584,7 +584,7 @@ class ViewerCommander:
             "following": self._following,
             "ball_seen": self._sighting() is not None,
             "ball": self._ball_status(),
-            "ball_side": ball_side(self._bearing, self._sighting()),
+            "ball_side": ball_side(self._head[HEAD_YAW], self._sighting()),
             "ball_close": ball_close(self._sighting(), self._head[HEAD_PITCH]),
             "last_kick_travel": self._last_kick_travel,
             "searching": self._searching(),

@@ -1317,15 +1317,19 @@ def test_status_has_no_ball_side_and_no_kick_travel_before_anything_runs():
     assert status["last_kick_travel"] is None
 
 
-def test_a_ball_left_of_the_picture_centre_is_on_the_left():
-    _env, state, commander = _following_setup(col=40, row=60)
+def test_a_head_turned_left_gives_left_even_with_the_ball_right_in_the_picture():
+    env, state, commander = _following_setup(col=120, row=60)
     _pictures(commander, 1)
+    commander._head[HEAD_YAW] = 0.1
+    commander.tick()
     assert state.get_status()["ball_side"] == "left"
 
 
-def test_a_ball_right_of_the_picture_centre_is_on_the_right():
-    _env, state, commander = _following_setup(col=120, row=60)
+def test_a_head_turned_right_gives_right_even_with_the_ball_left_in_the_picture():
+    env, state, commander = _following_setup(col=40, row=60)
     _pictures(commander, 1)
+    commander._head[HEAD_YAW] = -0.1
+    commander.tick()
     assert state.get_status()["ball_side"] == "right"
 
 

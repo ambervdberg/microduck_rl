@@ -7,7 +7,7 @@ Head signs: positive pitch looks down, positive yaw looks left.
 BodyTurner turns the ball's bearing into a body turn rate for the face ball skill.
 BallHunt turns the body a full circle while the ball is out of view, then gives up.
 BallApproach picks the forward speed for the go to ball skill and says when the robot is there.
-ball_side and ball_close read the same sighting for the status the brain sees.
+ball_close reads the sighting, ball_side reads the head yaw instead, for the status the brain sees.
 """
 
 import math
@@ -54,12 +54,15 @@ def ball_bearing(yaw: float, sighting: BallSighting | None) -> float:
     return yaw - math.atan(sighting.x * TAN_HALF_WIDTH)
 
 
-def ball_side(bearing: float, sighting: BallSighting | None) -> str | None:
-    """Which side of the robot the ball is on, or None while no ball is in view."""
+def ball_side(head_yaw: float, sighting: BallSighting | None) -> str | None:
+    """Which side of the robot the ball is on, or None while no ball is in view.
+    Reads the head yaw, not one picture: it smooths many pictures, a single
+    picture's x is not steady this close to the ball.
+    """
     if sighting is None:
         return None
 
-    return "left" if bearing > 0.0 else "right"
+    return "left" if head_yaw > 0.0 else "right"
 
 
 def ball_close(sighting: BallSighting | None, pitch: float) -> bool:
