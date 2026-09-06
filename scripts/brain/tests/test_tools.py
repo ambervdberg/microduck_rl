@@ -550,7 +550,28 @@ def test_kick_gives_up_looking_after_its_own_cap(monkeypatch):
 
     # One read before the look, one after it, and one after the kick.
     assert len(_polls(received)) == looking + kicking + 3
-    assert [r[1] for r in _commands(received)] == ["/follow_ball", "/kick"]
+    assert [r[1] for r in _commands(received)] == ["/follow_ball", "/stop", "/kick"]
+
+
+def test_a_look_that_finds_no_ball_stops_the_head(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=False)], {"/kick": {"error": "no ball in view"}})
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert [r[1] for r in _commands(received)] == ["/follow_ball", "/stop", "/kick"]
+    assert result == {"error": "no ball in view"}
+
+
+def test_a_look_that_finds_the_ball_leaves_the_follow_running(monkeypatch):
+    received, server = _scripted_bridge(monkeypatch, [_ball(seen=False), _in_reach(travel=0.5)])
+    try:
+        tools.kick.invoke({})
+    finally:
+        server.shutdown()
+
+    assert "/stop" not in [r[1] for r in _commands(received)]
 
 
 def test_kick_still_kicks_when_the_look_is_rejected(monkeypatch):

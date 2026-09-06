@@ -403,7 +403,10 @@ def _look_for_ball() -> bool:
 
     while time.monotonic() < deadline:
         if _poll_status().get("ball_seen"):
-            break
+            return True
+
+    # No ball found: end the follow, or the head sweeps on until the user speaks.
+    _post("/stop", {})
 
     return True
 
