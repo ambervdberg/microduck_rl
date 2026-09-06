@@ -14,9 +14,11 @@ with the same routes infer_policy.py --bridge serves (/walk, /look, /gesture, /s
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import sys
 
+import mujoco
 import numpy as np
 import onnxruntime as ort
 import torch
@@ -34,13 +36,29 @@ from mjlab.viewer import ViserPlayViewer
 from viewer_commander import HEAD_CAMERA, ViewerCommander, ViewerLimits
 
 import mjlab_microduck.tasks  # noqa: F401  registers the tasks
-from mjlab_microduck.robot.microduck_constants import MICRODUCK_BALL_CFG, MICRODUCK_STANDUP_ROBOT_CFG
+from mjlab_microduck.robot.microduck_constants import MICRODUCK_BALL_CFG, MICRODUCK_STANDUP_ROBOT_CFG, get_ball_spec
 
 TASK = "Mjlab-Velocity-Flat-MicroDuck"
 LONG_EPISODE_S = 3600.0
 
 # Contact headroom for the ball, the same value the kick task uses.
 BALL_NCONMAX = 50
+
+# A real ball stops in a metre or two, the model's 0.0001 rolls for ever.
+BALL_ROLLING_FRICTION = 0.005
+
+# Default condim (3) only models sliding friction, so rolling friction above
+# is otherwise ignored. condim 6 turns on torsional and rolling friction too.
+BALL_ROLLING_CONDIM = 6
+
+
+def rolling_ball_spec() -> mujoco.MjSpec:
+    """The kick ball spec with rolling friction raised so it stops like a real one."""
+    spec = get_ball_spec()
+    geom = spec.geom("ball_geom")
+    geom.condim = BALL_ROLLING_CONDIM
+    geom.friction[2] = BALL_ROLLING_FRICTION
+    return spec
 
 # The head_camera exported into the model faces backward and lies on its side.
 # The viewer adds its own on the head, looking ahead and 25 degrees down.
@@ -106,7 +124,8 @@ def viewer_cfg(sitstand: bool = False, ball: bool = False, camera: bool = False)
 
     # The robot stays first: reset events write its root state at qpos[:, 0:7].
     if ball:
-        cfg.scene.entities = {**cfg.scene.entities, "ball": MICRODUCK_BALL_CFG}
+        rolling_ball_cfg = dataclasses.replace(MICRODUCK_BALL_CFG, spec_fn=rolling_ball_spec)
+        cfg.scene.entities = {**cfg.scene.entities, "ball": rolling_ball_cfg}
         cfg.sim.nconmax = BALL_NCONMAX
 
     if camera:

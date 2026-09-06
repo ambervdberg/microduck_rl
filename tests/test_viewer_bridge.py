@@ -3,10 +3,13 @@ import os
 import sys
 from argparse import Namespace
 
+import pytest
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from viewer_bridge import (
+    BALL_ROLLING_FRICTION,
     HEAD_CAMERA_CFG,
     bridge_limits,
     keep_alive,
@@ -15,6 +18,7 @@ from viewer_bridge import (
     needs_ground_contact,
     parse_args,
     policy_paths,
+    rolling_ball_spec,
     viewer_cfg,
 )
 from viewer_commander import HEAD_CAMERA
@@ -130,6 +134,18 @@ def test_the_ball_joins_the_scene_second_with_contact_headroom():
     cfg = viewer_cfg(sitstand=True, ball=True)
     assert list(cfg.scene.entities) == ["robot", "ball"]
     assert cfg.sim.nconmax == 50
+
+
+def test_the_ball_rolls_to_a_stop_instead_of_rolling_for_ever():
+    spec = rolling_ball_spec()
+    friction = spec.geom("ball_geom").friction
+    assert friction[2] == pytest.approx(BALL_ROLLING_FRICTION)
+    assert friction[0] == pytest.approx(0.5)
+
+
+def test_the_viewer_ball_uses_the_rolling_friction_spec():
+    cfg = viewer_cfg(ball=True)
+    assert cfg.scene.entities["ball"].spec_fn is rolling_ball_spec
 
 
 def test_no_kick_flag_means_no_ball():
