@@ -341,7 +341,8 @@ def kick(foot: str = "auto") -> str:
 
     foot: 'auto' lets the robot kick with the foot the ball is on, 'left' or
     'right' pick one. The robot must be standing and free. The reply says foot,
-    kicked true only when the ball moved, travel in metres, walked_up true when
+    kicked true only when the ball moved and null when the robot cannot tell,
+    travel in metres, walked_up true when
     the robot walked to the ball first, and looked true when it turned the head
     camera on to find the ball. When the walk to the ball did not arrive, the
     reply is that walk instead, with approach gave_up, lost or walking and no
@@ -418,12 +419,17 @@ def _walk_up() -> dict:
 
 
 def _kick_reply(echo: dict, status: dict, walked_up: bool, looked: bool) -> str:
-    """Build the kick reply from the trick the bridge ran and the status after it."""
-    travel = float(status.get("last_kick_travel") or 0.0)
+    """Build the kick reply from the trick the bridge ran and the status after it.
+
+    No travel field means the robot cannot tell whether the ball moved: both
+    kicked and travel come back null.
+    """
+    raw = status.get("last_kick_travel")
+    travel = None if raw is None else float(raw)
+    kicked = None if travel is None else travel > KICK_TRAVEL_M
     foot = str(echo.get("trick") or "").removeprefix("kick_")
 
-    return json.dumps({"foot": foot, "kicked": travel > KICK_TRAVEL_M, "travel": travel, "walked_up": walked_up,
-                       "looked": looked})
+    return json.dumps({"foot": foot, "kicked": kicked, "travel": travel, "walked_up": walked_up, "looked": looked})
 
 
 @tool

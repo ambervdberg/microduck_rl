@@ -610,6 +610,30 @@ def test_kick_says_missed_when_the_ball_barely_moved(monkeypatch):
     assert result["travel"] == 0.1
 
 
+def test_kick_cannot_tell_when_the_status_has_no_travel_field(monkeypatch):
+    after = _in_reach()
+    del after["last_kick_travel"]
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach(), after])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["kicked"] is None
+    assert result["travel"] is None
+
+
+def test_kick_cannot_tell_when_the_travel_is_null(monkeypatch):
+    _received, server = _scripted_bridge(monkeypatch, [_in_reach(), _in_reach(travel=None)])
+    try:
+        result = json.loads(tools.kick.invoke({}))
+    finally:
+        server.shutdown()
+
+    assert result["kicked"] is None
+    assert result["travel"] is None
+
+
 def test_kick_wait_gives_up_after_the_cap_from_the_kick_seconds(monkeypatch):
     received, server = _scripted_bridge(monkeypatch, [_in_reach(trick="kicking")])
     try:
